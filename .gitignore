@@ -1,0 +1,4 @@
+runs/
+docs/bench/*.npz
+docs/bench/*.json
+.DS_Store

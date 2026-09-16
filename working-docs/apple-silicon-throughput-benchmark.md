@@ -585,6 +585,64 @@ def get_walk_backlash_spec(): return MjSpec.from_file(MICRODUCK_WALK_BACKLASH_XM
 
 ---
 
+### 9.6 为什么 `microduck_local` 只用 ~5 核（而这台机器有 18 核）？
+
+这是读者几乎一定会问的问题，而且答案对一个 18 核机器看起来像浪费。**实测结论：
+~5 核是**这个 harness 的并行效率上限**，不是这台 Mac 的上限。**
+
+**证据一：瞬时核数平稳在 ~5，不是阶段交替造成的平均效应**
+
+用累计 CPU 时间差分测（`cpu_phases.py`；`ps -o %cpu` 在 macOS 上是衰减平均，
+会抹掉阶段性，不可用）：
+
+```
+total wall 53.1s
+instantaneous cores: peak 5.99  p50 5.00  p90 5.43  min 0.00
+t=  0.5s  2.35 cores   t=11.3s  4.62 cores   t=28.6s  5.37 cores   t=46.0s  4.82 cores
+t=  2.6s  4.67 cores   t=17.8s  5.43 cores   t=37.3s  4.82 cores   t=50.3s  5.62 cores
+```
+
+**证据二：32 个 worker 每个只 ~12% 忙，真正忙的是那个父进程**
+
+稳态下按进程采样（32 envs）：
+
+| 进程 | %CPU | 折合核数 |
+|---|---:|---:|
+| **1 个父进程**（trainer：vec-step 汇总 + PPO update） | 105–144% | **1.1–1.4** |
+| 32 个 worker，**每个** | 9–14% | **0.1** |
+| 合计（36 进程） | — | **4.2–5.2** |
+
+worker 不是在算，是**在等 IPC 往返**——单个 env-step 的物理量太小，
+被 fork/pipe 的开销盖过。这正是 `microduck_local/README.md` 说的
+*"At 16 envs the workers are ~11% busy — the parent's serial per-vec-step work is
+what extra envs amortize."*
+
+**证据三：加 worker 买不到吞吐——三倍并行度只换 +4%**
+
+| envs | wall | user+sys | 实用核数 | steps/s |
+|---:|---:|---:|---:|---:|
+| 32 | 51.06 s | 255.95 s | 5.01 | 19,585 |
+| 64 | 49.06 s | 284.45 s | 5.80 | 20,383 |
+| **96** | 48.95 s | 305.67 s | **6.24** | **20,429** |
+
+**worker 数 ×3 → 吞吐 +4%，核数只从 5.0 涨到 6.2。** harness 已饱和，
+它**没有能力**把更多并行 worker 换成速度。与 README 自己测的曲线一致
+（24 envs 已是 ~17.1k 渐近线的 92%，64 envs 与 24 envs 基本相同）。
+
+**证据四：有效"快核宽度"是 6，不是 18**
+
+M5 Max 是 **6 性能核 + 12 能效核**。能效核单核性能约为性能核的 1/3，且 macOS 只在
+性能核饱和后才把重活迁过去。而实测**峰值 5.99 ≈ 6**——工作**正好卡在 6 个性能核上**，
+能效核基本闲置（因为没有更多活可派）。
+
+**结论：** 把 18 核当作可用算力是错的。真实情况是
+**「6 个快核的有效宽度」×「harness 只能喂饱其中 ~5 个」**。
+瓶颈是父进程的**串行部分**（per-vec-step 汇总 + PPO update）与 IPC 开销，
+不是核数。**这也正是 `microduck_rl` 走 CUDA 才快的原因**——GPU 的并行不受这个
+串行/IPC 结构限制，而 CPU fork 方案受。
+
+---
+
 ## 10. 一句话回答
 
 **MPS 救不了这件事：物理占 98.35% 且 Apple GPU 在这个技术栈里根本用不上

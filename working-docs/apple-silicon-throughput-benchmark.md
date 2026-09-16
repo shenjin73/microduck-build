@@ -16,7 +16,7 @@
 | | 单次正式训练（4096 envs × 4000 iters ≈ 3.93 亿 env steps） |
 |---|---:|
 | **本机 Mac（M5 Max，CPU 物理）** | **约 115 小时 ≈ 4.8 天** |
-| 云 NVIDIA（官方 README 口径） | 约 1–2 小时 |
+| 云 NVIDIA（`microduck_rl/README.md` 口径） | 约 1–2 小时 |
 
 > **红线（沿用计划 Week 0.5）：** 本结论及任何「Mac 上能训练」的说法都必须注明当时的
 > `num-envs`。本次最优档是 **1024 envs**；`--num-envs 16` 能跑 ≠ 能做正式训练。
@@ -58,7 +58,7 @@
 | 平台 | 峰值 num-envs（不 OOM） | 峰值 env steps/sec | 折算单次正式训练 | 单次成本 |
 |---|---:|---:|---:|---:|
 | **本机 Mac（M5 Max）** | **4096**（内存 8.1 GB，远未触顶） | **953** | **≈ 115 h ≈ 4.8 天** | 电费 ~0 |
-| 云 NVIDIA | 待补测 | 待补测 | README 口径 ~1–2 h | 待你补测 |
+| 云 NVIDIA | 待补测 | 待补测 | `microduck_rl/README.md` 口径 ~1–2 h | 待你补测 |
 
 **关于「峰值 num-envs」这一列要特别注意：** 它填 4096 是因为 `4096` **跑得起来**
 （峰值 RSS 仅 8.1 GB / 128 GB），**不是因为它快**。吞吐在 1024 envs 就到顶，
@@ -92,7 +92,7 @@
 
 > ⚠️ **口径说明（重要，避免误读）：** 下表用的 **4000 iterations 是「收敛预算」口径**，
 > 来源是 `microduck_rl/AGENTS.md:208-209`：*"gaits and curriculum-heavy recovery need
-> 4000–6000"*，与 README 的 *"~1-2 h for a usable gait at 4096 envs"* 一致。
+> 4000–6000"*，与 `microduck_rl/README.md` 的 *"~1-2 h for a usable gait at 4096 envs"* 一致。
 >
 > **它不是代码里的默认值。** walk 任务的 `MicroduckRlCfg` 配的是
 > **`max_iterations=50_000`**（`microduck_velocity_env_cfg.py:948`）——即不加
@@ -409,9 +409,9 @@ No-Go 的范围比听起来**窄得多**。上面第 3 节的 950 steps/s 是 **
 | harness | steps/s | 来源 |
 |---|---:|---|
 | **`microduck_local`**（train-walk，BAM+DR） | **~19,000** | 本次实测 |
-| `microduck_local`（train-behavior，README 口径） | ~17,100 | README |
+| `microduck_local`（train-behavior，README 口径） | ~17,100 | `microduck_local/README.md` |
 | `microduck_rl`（CPU 模式） | **950** | 本次实测（第 3 节） |
-| `microduck_rl`（CUDA，官方 1–2 h / 3.93 亿步） | ~55,000–109,000 | **[由 README 口径反推，非实测]** |
+| `microduck_rl`（CUDA，官方 1–2 h / 3.93 亿步） | ~55,000–109,000 | **[由 `microduck_rl/README.md` 口径反推，非实测]** |
 
 **结论：在 Mac 上做原型应该用 `microduck_local`，永远不要用 `microduck_rl`。**
 后者在 Mac 上比前者慢 20 倍——它的存在意义是 CUDA 上的最终训练。
@@ -474,7 +474,7 @@ README 那句 *"What it is NOT for: the final policy you put on the robot"* 常�
 | KP / KD / 关节阻尼 / 初始倾角 / symmetry | ❌ 本来就关 | – | 不是缺口 |
 | Backlash（齿隙） | ⚠️ **是独立的可选任务**，**不在默认 velocity 任务里** | ❌ 无对应实现 | 只在选它时才是缺口 |
 
-**所以对 base 的 velocity 任务，缺口是 3 个 obs 级 DR 项**——而 README 自己
+**所以对 base 的 velocity 任务，缺口是 3 个 obs 级 DR 项**——而 `microduck_local/README.md` 自己
 （第 74–75 行）描述它们是：
 
 > *Not mirrored: IMU misalignment, encoder bias and the 0–1 step IMU delay — obs-level terms,
@@ -507,7 +507,7 @@ def get_walk_backlash_spec(): return MjSpec.from_file(MICRODUCK_WALK_BACKLASH_XM
 
 #### 关于「local 是 single-env CPU」
 
-README 第 46 行的 "single-env CPU" 指的是**架构**（CPU MuJoCo，非 GPU Warp 并行），
+`microduck_local/README.md:46` 的 "single-env CPU" 指的是**架构**（CPU MuJoCo，非 GPU Warp 并行），
 不是「只跑 1 个 env」——同一份 README 第 137–149 行的表就是 4 → 64 envs，
 本次实测也用 32 envs 跑到 ~19,000 steps/s。把它读成「单环境」与 README 自己的数据矛盾。
 
@@ -558,3 +558,65 @@ README 第 46 行的 "single-env CPU" 指的是**架构**（CPU MuJoCo，非 GPU
 **所以 Mac 是这个项目的主要开发机，不是凑合用的备胎。** 它缺的只有真机硬件；
 Week 8–9 的算力是**可选**的——云 GPU（保真度基准，1.5 h）或 Mac + `microduck_local`
 （零成本，过夜）。**唯一未证的是：`local` 训出的策略能否等价上真机**（9.5 节）。
+
+---
+
+# 附录 A：修正记录（本报告的结论如何被改过）
+
+本报告经过四轮 review/challenge。**记录在这里是因为散落在各节的修正，会让后续读者
+看不出哪些结论被推翻过、以及凭什么推翻。** 每条都附可复核的证据。
+
+## A.1 被修正的论断
+
+| # | 原论断 | 现在 | 定案证据 |
+|---|---|---|---|
+| 1 | 「`microduck_local` 与 `microduck_rl` **不能互相替代**」（本报告作者，口头） | **过度声称，已收回。** `microduck_local/README.md` 那句是对**风险**的建议，不是能力判定：同页 `microduck_local/README.md:42-43` 说导出 ONNX 是 *drop-in compatible*；且本仓库 `custom-motor-guide.md` §6 主张的正是相反做法 | `microduck_local/README.md:42-49`、`custom-motor-guide.md` §6 |
+| 2 | 「DR 是 `rl` 的一个子集」（模糊） | **精确为 3 个 obs 级项**：IMU 安装误差 ±6°、编码器 bias ±0.015 rad、IMU 延迟 0–1 步。`rl` **实际启用**的其余 DR 全部已对齐 | `microduck_velocity_env_cfg.py:31-41,84,85` vs `walk_env.py:110-117`；`microduck_local/README.md:74-75` 自述这三项 *"each a small change to `_get_obs`"* |
+| 3 | 「backlash 是 `rl` 独有、`local` 完全没有 → 换 clone 舵机的**关键缺失**」（外部 review） | **对默认任务不成立。** 计划 Week 8–9 跑的 `Mjlab-Velocity-Flat-MicroDuck` 用的是 `get_walk_spec` → **无 backlash**。backlash 是**独立的按需任务**（`Mjlab-Velocity-Flat-Backlash-MicroDuck`） | `microduck_constants.py:47,77`（两个 spec 加载不同 XML）；`tasks/__init__.py:82,255`；`microduck_rl/AGENTS.md`: *"so backlash A/B comparisons are unconfounded"* |
+| 4 | 「`local` 是 **single-env** CPU」（外部 review） | **误读。** `microduck_local/README.md:46` 的 "single-env" 指**架构**（CPU MuJoCo vs GPU Warp），非 env 数量——**同一份 README 的表就是 4→64 envs**；本次实测用 32 envs 跑到 ~19,000 steps/s | `microduck_local/README.md:137-149`；本报告第 9.1 节 |
+| 5 | 「ONNX 导出**未跑通验证**」（外部 review） | **错。已验证两次。** `export-walk` rc=0 → 793,935 B；且 `onnxruntime` 读回确认新导出的与官方 `alpha_walking.onnx` **签名一致** `obs[1,61] → actions[1,14]`，前向推理成功 | 本报告第 6 节；第 9.1 节计时表 |
+| 6 | 「报告没提 `max_iterations` 默认值」（外部 review） | **质疑成立。** 已补三口径对照表（4000 / 6000 / **50,000**）。⚠️ 本报告作者一开始**怀疑这条并查错了**（用 `head -10` 被 roller 任务与 `.pyc` 二进制命中截断），复核后确认外部 review 正确 | `microduck_velocity_env_cfg.py:948` |
+| 7 | 第 3 节的耗时表只有「`rl` on Mac」一列，与第 9.5 节的结论**列不对齐** | **已扩为三口径 × 三路线**（`rl` on Mac / `local` on Mac / 云 GPU），并加三条必读注意（step 数折算 ≠ 等效质量） | 本报告第 3 节 |
+
+## A.2 经复核无误的数字
+
+外部 review 独立复算过吞吐阶梯，**算术全部自洽**（每行 `envs×24÷(s/iter)` 反算回
+报告的 steps/s，误差 <2%）；3.93 亿步、4.8 天、MPS 1.41% 上限均对得上。以下结论经
+**多条独立证据**支持，未被任何一轮推翻：
+
+- `select_gpus()` 在 Apple Silicon 上 `IndexError`（`mjlab/utils/gpu.py:70`）；
+- `CUDA_VISIBLE_DEVICES=""` 触发 mjlab 自带的 CPU 模式（`gpu.py:56`）；
+- **MPS 无用**：物理占 iteration **98.35%**，且 Warp 无 Metal 后端 + `mujoco_warp` CUDA-only
+  + `libwarp.dylib` 里 metal 符号 0 个（三条独立证据）；
+- 吞吐在 **1024 envs 触顶 953 steps/s**，内存从不是瓶颈（4096 envs 峰值 8.1 GB）；
+- 结论 **No-Go**（针对 `rl`-on-Mac）不受任何一轮修正影响。
+
+## A.3 仍未证的命题（请勿在后续引用中读成已证）
+
+1. **`local` 训出的策略能否等价上真机** —— 本报告最有分量的一条未证项。需 Week 7 HIL。
+2. **两个 harness 的 step 数不等价** —— 单位口径都不同（SB3 `fps` vs rsl_rl `steps/s`），
+   n_steps 51 vs 24，奖励细节不同。第 9.5 节的表**只证明算力够，不证明结果等价**。
+3. **`local` 长训练的 reward 曲线** —— 19,000 steps/s 是**吞吐**，不等于**收敛质量**。
+4. **云 NVIDIA 那一行** —— 全部是**由 `microduck_rl/README.md` 口径反推**，非实测。
+5. **`microduck_rl` 的 `scripts/export.py`** —— 与 `local` 的 `export-walk` 是两条路径，
+   前者（需 `--wandb-run-path`）仍未跑。
+
+## A.4 一类反复出现的错误（值得记住）
+
+四轮里，**关于「某个东西在不在代码里 / 跑没跑通」的断言，错了 3 次**（A.1 的 #3、#4、#5），
+而**算术与推理部分一次没错**。
+
+共同点：错误全部来自**从二手描述推理**——从 `microduck_local/README.md` 的措辞（"single-env"）、从上一轮的
+转述（"backlash 是 rl 独有"）——而**没有回源码或实测**。这类断言每条只需一次
+`grep tasks/__init__.py` 或一次 `onnxruntime` 读回就能定案。
+
+**作者本人也犯了同一个错**：收到 #6 时先用 `head -10` 截断证据就下判断，结果是我错。
+
+**因此本报告的可信区间是：**
+- 算术、换算、投影 → **可放心引用**（已被独立复算）；
+- 「X 在不在代码里 / Y 跑没跑通」→ **必须回源码或实测复核**，包括本报告自己的表述。
+
+> 这条也是本项目 `microduck_local/AGENTS.md` 里那条纪律的同一形状：
+> *"Before believing an EDIT, check the thing you changed is the thing you meant"* ——
+> 以及 *"construct the object and call the method"*。
+> 一个能 parse、能 import 的论断，不等于它说的就是代码在跑的东西。

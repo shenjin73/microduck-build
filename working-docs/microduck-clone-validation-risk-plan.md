@@ -11,7 +11,7 @@
 
 1. **执行器模型不匹配**：官方策略和 `microduck_rl` 的 sim2real 核心围绕 Dynamixel XL330 + BAM M6 参数建立。换电机会直接改变力矩、电流限制、速度、延迟、摩擦、齿隙、编码器读数和热保护。
 2. **运行时硬件接口不兼容**：官方 `microduck` runtime 当前代码是 `DynamixelIo`，使用 `rustypot::servo::dynamixel::xl330::Xl330Controller`，读写 XL330 寄存器。Feetech HD 系列即使也是串口总线舵机，也大概率不能直接跑原 runtime。
-3. **Apple Silicon 限制是真的，但要更精确地表述**：`microduck_rl` 官方训练路径依赖 MuJoCo Warp + CUDA，Mac/Apple Silicon 不能等价替代官方 NVIDIA/CUDA 大规模训练。Mac 可以跑 `microduck_local` CPU harness 做验证/小规模训练/可视化，也可以尝试把训练改成 CPU/MPS fallback；但这必须通过吞吐、reward、BAM parity、ONNX contract 和 HIL 验证，不能只以“代码能跑”为成功标准。最终高质量 sim2real 仍建议保留 NVIDIA GPU 或 HF Jobs 路线作为基准。**这一点应在采购硬件前就用数字定论——见 Week 0.5 的 Apple Silicon 吞吐前置验证（Go/No-Go）。**
+3. **Apple Silicon 限制是真的，但要更精确地表述**：`microduck_rl` 官方训练路径依赖 MuJoCo Warp + CUDA，Mac/Apple Silicon 不能等价替代官方 NVIDIA/CUDA 大规模训练。Mac 可以跑 `microduck_local` CPU harness 做验证/小规模训练/可视化，也可以尝试把训练改成 CPU/MPS fallback；但这必须通过吞吐、reward、BAM parity、ONNX contract 和 HIL 验证，不能只以“代码能跑”为成功标准。最终高质量 sim2real 仍建议保留 NVIDIA GPU 或 HF Jobs 路线作为基准。**这一点已在采购硬件前用数字定论（Week 0.5，2026-09-16 完成）：`microduck_rl` on Mac 为 No-Go（953 steps/s，单次训练 4.8–60 天）；但 `microduck_local` on Mac 实测 ~19,000 steps/s，同量级 step 预算过夜（5.8–8.6 h）可完成，故正式训练有云 GPU 与 Mac 过夜两条路。MPS/Apple GPU 无用（加速上限 1.41%）。详见 `apple-silicon-throughput-benchmark.md`。**
 4. **机械“外形尺寸一致”不足以免改仿真**：即使外壳尺寸相同，质量、惯量、轴心/安装偏移、输出盘厚度、限位、齿隙、线缆/连接板重量都会影响 800g 小双足；需要实测并更新 MJCF/DR。
 5. **`custom-motor-guide.md` 有多处需要修正**：尤其是 BAM motor_name、系统辨识命令、`microduck_local` 参数接入、`--init-from ONNX`、以及把 `infer_policy.py` 当作真机部署测试。
 
@@ -636,7 +636,36 @@ obs[1,61] -> action[1,14]
 3. 供电是 2S Li-ion 6.6–8.4V 还是别的？
 4. 是否保持 15 个舵机，其中 mouth 不进 policy？
 
-### Week 0.5：Apple Silicon 吞吐前置验证（采购硬件前必做的 Go/No-Go）
+### Week 0.5：Apple Silicon 吞吐前置验证（采购硬件前必做的 Go/No-Go）✅ **已完成 2026-09-16**
+
+> **结果：No-Go（针对 `microduck_rl`），但结论是分层的**
+>
+> 实测详见 **`working-docs/apple-silicon-throughput-benchmark.md`**（含决策表、每档原始数据、
+> 脚本与日志在 `working-docs/apple-silicon-bench/`）。测试机：Apple M5 Max（18 核 / 128 GB）。
+>
+> | 平台 | 峰值 steps/s | 单次正式训练（3.93 亿 env steps） |
+> |---|---:|---:|
+> | `microduck_rl` on Mac | **953**（1024 envs 触顶，再堆 env 反降到 825） | **4.8 天**；按代码默认 `max_iterations=50_000` 则 **≈ 60 天** |
+> | `microduck_local` on Mac | **~19,000** | **5.8 h（过夜）** |
+> | 云 NVIDIA（由 `microduck_rl/README.md` 口径反推，非实测） | ~73,000 | 1.5 h |
+>
+> **三条结论：**
+>
+> 1. ❌ **`microduck_rl` on Mac：No-Go**（4.8–60 天，不可行）。且官方命令**开箱即死**——
+>    `select_gpus()` 索引空 CUDA 列表（`mjlab/utils/gpu.py:70`），需
+>    `CUDA_VISIBLE_DEVICES=""` 才进 mjlab 自带的 CPU 模式，加 `WANDB_MODE=disabled`。
+> 2. ✅ **`microduck_local` on Mac：可行**——~19,000 steps/s（快 20 倍，分解为核数 4.6× ×
+>    单核效率 4.5×），Week 4/5 全部命令实测通过，一次「改 reward → 训 1M 步 → 渲染看片」
+>    迭代约 **82 秒**，同量级 step 预算**过夜可完成**。
+> 3. ❌ **MPS / Apple GPU 无用**——物理占 iteration 的 **98.35%**，而 Warp 无 Metal 后端
+>    （`libwarp.dylib` metal 符号 0 个）+ `mujoco_warp` CUDA-only，Apple GPU 在这条栈上
+>    根本用不上；把 MLP 搬到 MPS 的上限只有 **1.41%**。
+>
+> **对后续阶段的影响：**
+> - **Week 8–9 改为两条路**（见该节）：路线 A 云 GPU（保真度基准）/ 路线 B Mac + `microduck_local`
+>   过夜（零成本 MVP）。**不再需要「只能租卡」这个默认假设。**
+> - **Week 4/5 无需改动**，但其可行性已由实测确认（原为推断）。
+> - **唯一未证：** `microduck_local` 训出的策略能否等价上真机——需 Week 7 HIL 才能定论。
 
 **为什么前置：** 「Apple Silicon 能否替代 NVIDIA 做正式训练」是整个项目里风险/回报比最不对称、且**完全不依赖任何硬件**的一步。它决定后面所有训练要押在本地 Mac 还是云 GPU 上。与其拖到 Week 8–9 才发现 Mac 吞吐不够、被迫返工，不如现在——**在下单 HD-1910 之前**——用官方 `microduck_rl` 的现成 MicroDuck 环境把这个数字测出来。这一步不需要 clone physics、不需要 connector board、不需要真机。
 
@@ -682,7 +711,11 @@ uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 512 --agent.max_
 - **否则默认结论：Mac 只用于开发/验证/小规模 smoke，正式训练走 NVIDIA/HF Jobs。** 这也是文档其余部分的基准假设（见 R1、Week 8–9）。
 - **红线：** 任何「Mac 上能训练」的结论必须注明当时的 `num-envs`。`--num-envs 16` 能跑 ≠ 能做正式训练——降 env 数换「能跑」不算通过。
 
-**交付物：** `working-docs/apple-silicon-throughput-benchmark.md`，含上面填好的决策表、每档 steps/sec 原始数据、以及一句明确的 Go/No-Go 结论。
+**交付物：** ✅ **已交付（2026-09-16）** —— `working-docs/apple-silicon-throughput-benchmark.md`，
+含填好的决策表、每档 steps/sec 原始数据、明确的 Go/No-Go 结论，以及复现脚本与原始日志
+（`working-docs/apple-silicon-bench/`）。**结论：`microduck_rl` on Mac No-Go；
+`microduck_local` on Mac 过夜可行；MPS/Apple GPU 无用（上限 1.41%）。**
+该报告的附录 A 记录了本结论经过的四轮修正及其证据。
 
 ### Week 1：硬件接口 spike：单电机 + 总线
 
@@ -916,7 +949,21 @@ gain_limp = 30
 
 **目标：** 用 clone physics 训练可部署 gait。
 
-**前提：** 路线选择应在 **Week 0.5** 已经用数字定下——如果 Apple Silicon 吞吐前置验证判定为 No-Go（预期的默认结论），本阶段直接走路线 A，路线 B 只作实验，不要在这里才重新纠结「能不能用 Mac」。这里训练用的是 clone physics（BAM/质量/摩擦已按前几周测量更新），env 环境与 Week 0.5 的官方基准环境不同，但吞吐结论沿用 Week 0.5。
+**前提：** ✅ **Week 0.5 已定案（2026-09-16）**，本阶段按下面两条路并行推进，不必再纠结「能不能用 Mac」：
+
+- **路线 A（保真度基准，默认推荐）：** 云 NVIDIA / HF Jobs 跑官方 `microduck_rl`。
+  官方栈 = 完整 DR + 可选 backlash 变体 + 几千 env 并行，是 sim2real 可信度的来源。
+- **路线 B（零成本 MVP）：** Mac + `microduck_local` 过夜训练（实测 ~19,000 steps/s，
+  同量级 step 预算 5.8–8.6 h）。**建议先补 3 个 obs 级 DR 缺口**（IMU 安装误差 ±6°、
+  编码器 bias ±0.015 rad、IMU 延迟 0–1 步），它们是 `microduck_local` 与 rl base
+  velocity 任务之间**唯一**的 DR 差异，且都是 `_get_obs` 级别的小改动。
+
+⚠️ **两条路不可等价互换：** 两个 harness 的 step 数口径不同（SB3 `fps` vs rsl_rl
+`steps/s`，n_steps 51 vs 24），**跑同样步数不保证同样质量**。`microduck_local` 训出的
+策略能否上真机**尚未验证**，需 Week 7 HIL 定论。详见
+`apple-silicon-throughput-benchmark.md` 第 9.5 节与附录 A。
+
+这里训练用的是 clone physics（BAM/质量/摩擦已按前几周测量更新），env 环境与 Week 0.5 的官方基准环境不同，但吞吐结论沿用 Week 0.5。
 
 #### 路线 A：NVIDIA GPU / HF Jobs 基准训练（默认基准）
 
@@ -929,9 +976,27 @@ uv run train Mjlab-Velocity-Flat-MicroDuck \
   --run-name hd1910-walk-v1
 ```
 
-#### 路线 B：Apple Silicon fallback 训练验证
+#### 路线 B：Mac + `microduck_local` 训练（Week 0.5 后已升级为**正式可选路**，不再是「实验对照」）
 
-仅在 **Week 0.5 判定 Go**、或作为实验对照时才走这条。若已把 `microduck_rl` 改到 CPU/MPS backend，先不要直接跑大训练，按顺序验证（与 Week 0.5 的检查同源，这里换成 clone physics 环境再确认一遍）：
+**Week 0.5 实测结论：** Mac 上 `microduck_local` ~19,000 steps/s，同量级 step 预算
+5.8–8.6 h（过夜）。路线 B 不再是「仅当判定 Go 才走」，而是**零成本 MVP 的推荐起点**——
+先用它训出能走的 policy 验证整套 clone physics/reward/export 链路，需要最终量产质量时再上路线 A。
+
+**先补 3 个 obs 级 DR 缺口**（与 rl base velocity 任务的**唯一** DR 差异）：
+IMU 安装误差 ±6°、编码器 bias ±0.015 rad、IMU 延迟 0–1 步。
+
+```bash
+# microduck_local 的原生单位是 --steps（不是 --iterations）。
+# 下例用与官方同量级的 step 预算（≈3.9 亿）作起点；step 数两栈不等价，
+# 实际收敛步数需按 reward 曲线调整，不要当成已校准的配方。
+cd microduck-lab/microduck_local
+uv run train-walk --envs 32 --steps 390_000_000 --actuator bam --run-name clone-walk-v1
+uv run export-walk runs/clone-walk-v1
+uv run render-rollout --policy runs/clone-walk-v1/policy.onnx --behavior run --out /tmp/clone-walk
+```
+
+⚠️ **若坚持用官方 `microduck_rl` 跑 CPU/MPS fallback**（不推荐，比 `microduck_local` 慢 20 倍），
+先不要直接跑大训练，按顺序验证（与 Week 0.5 的检查同源，这里换成 clone physics 环境再确认一遍）：
 
 ```bash
 cd microduck-lab/microduck_rl
@@ -1120,4 +1185,4 @@ impl RobotIo for BusBackend {
 
 ## 9. 推荐总体路线图一句话版
 
-**先不要围绕 HD-1910 直接做整机。** 先用一周把 HD-1910 的协议、50Hz bus、读数、温升和 BAM 可辨识性验证掉；如果它过关，再做 connector board 和 MJCF delta；Mac 上用 `microduck_local` 做快速验证，NVIDIA/HF Jobs 做最终 `microduck_rl` 训练；真机部署保持 61D/14 action contract，通过 runtime 的 `RobotIo` 后端适配新电机，而不是改 policy 接口。
+**先不要围绕 HD-1910 直接做整机。** 先用一周把 HD-1910 的协议、50Hz bus、读数、温升和 BAM 可辨识性验证掉；如果它过关，再做 connector board 和 MJCF delta；Mac 上用 `microduck_local` 做快速验证与**过夜训练**（Week 0.5 实测 ~19,000 steps/s；`microduck_rl` 在 Mac 上不可行，953 steps/s），需要最终 sim2real 质量时再上 NVIDIA/HF Jobs 跑官方 `microduck_rl`；真机部署保持 61D/14 action contract，通过 runtime 的 `RobotIo` 后端适配新电机，而不是改 policy 接口。

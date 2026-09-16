@@ -97,6 +97,45 @@
 > ⚠️ **本节的 745–953 steps/s 全部是 `microduck_rl` 在 CPU 模式下的数字。**
 > 同机 `microduck_local` 是 ~19,000 steps/s（见第 9 节），**不要把本节读成「Mac 的吞吐」**。
 
+#### 先解释：`envs` 是什么，为什么 `rl` 用 4096 而 `local` 只用 32
+
+**`envs` = 并行仿真实例（environment）的数量。** 每个 env 是**同一台机器人的一份独立副本**，
+有自己的关节角、速度、姿态和随机化参数。PPO 同时从所有 env 收集经验——这样样本之间才不相关
+（单个 env 连续采样会高度相关，梯度会有偏）。
+
+**关键：`envs` 的数量不是调优偏好，而是并行机制的直接结果。**
+
+| | `microduck_rl`（MuJoCo Warp） | `microduck_local`（MuJoCo CPU） |
+|---|---|---|
+| 并行机制 | **一个进程内的大数组**：一次 kernel 调用步进全部 env | **每个 env 一个 OS 进程**（fork）+ IPC 管道 |
+| 4096 envs 的代价 | 一个数组，实测 8.1 GB —— **可行** | 4096 个 Python 进程 —— **不可行** |
+| 32 envs 的代价 | 远未跑满（它的设计目标是 GPU 上的几千个） | 32 进程 + 管道，实测只用 5–6 核（第 9.6 节） |
+| 为什么是这个数 | GPU 上「一个线程步进一个 world」，4096 是官方配方 | CPU 上每个 env 的成本 = 一个进程 + 一次 IPC 往返 |
+
+**`envs` 定的是「物理怎么并行」，不是「算力有多大」。**
+
+- **`microduck_rl` = GPU 思路。** 所有 env 的状态存在一组连续数组里，一次 kernel 启动
+  同时步进几千个 world。env 数几乎不增加额外开销，所以 4096 是自然的配方。
+- **`microduck_local` = CPU 多进程思路。** 每个 env 是一个 Python 进程，靠 fork 共享模型、
+  靠管道通信。所以它的 env 数上限来自「进程 + IPC 开销」，而不是内存。实测 32 envs
+  = 36 个进程，`--envs 96` 也能跑但只换来 +4% 吞吐（第 9.6 节证据三）。
+
+> ⚠️ **在 Mac 上，`rl` 的 4096 envs 买不到任何东西。** 我们确实跑起来了
+> （4096 envs、8.1 GB、0 error），但没有 GPU 去并行步进它们——CPU 后端只占 **1.06 核**，
+> 结果是 953 steps/s。**4096 在 GPU 上是优势，在 Mac 上是纯负担。**
+
+**`envs` 还决定学习动态，不只是速度。** PPO 每次 rollout 收集的样本数 = `envs × n_steps`：
+
+| | 每次 rollout 的 batch |
+|---|---:|
+| `microduck_rl`（官方） | 4096 × 24 = **98,304** |
+| `microduck_local`（32 envs） | 32 × 256 = **8,192** |
+
+**差 12 倍。** PPO 的梯度估计质量与 batch 大小直接相关——所以「跑同样的 step 数」
+**在机制上就**不能推出「同样的优化信号」，这是 9.5 节「step 数不可等价」的具体来源。
+
+---
+
 `64 / 256 / 512` 各跑 50 iteration（计时基准），`1024 / 2048 / 4096` 各跑 10 iteration
 （峰值扫描）。全部 0 error、0 traceback。`steps/s = num_envs × 24 ÷ 平均 iteration 耗时`
 （`NUM_STEPS_PER_ENV = 24`）。
@@ -432,9 +471,21 @@ No-Go 的范围比听起来**窄得多**。上面第 3 节的 950 steps/s 是 **
 
 全部 `rc=0`，无 Traceback。产出已验证：`policy.onnx`（793,935 B）+ `ep0.mp4` + `ep0_sheet.png`。
 
-**注意 `train-walk` 用了 n_steps≈51/env**（不是 `BehaviorEnv` 的 256），
-所以 1M steps 在 16 envs 下是 1220 次 update、32 envs 下是 610 次——两者总步数一致，
-这正好交叉验证了「1M 步」确实跑满。
+**交叉验证「1M 步确实跑满」：** `train-walk` 的 `n_steps = 256`/env（`ppo_hparams.N_STEPS`，
+与 `BehaviorEnv` 相同），所以每次 rollout 收集 `256 × envs` 步：
+
+| envs | 每次 rollout 步数 | 1M 步的 rollout 次数 | `--steps 100_000` 实测 `num_timesteps` |
+|---:|---:|---:|---:|
+| 16 | 4096 | 244 | — |
+| 32 | 8192 | 122 | — |
+| （校验用）16 | 4096 | — | **102,400**（= 25 × 4096，向上取整到 rollout 边界） |
+
+`num_timesteps` 是从保存的 `model.zip` 里读出的**权威值**，与 `--steps` 相符，
+说明吞吐换算（1M ÷ 51 s ≈ 19,000 steps/s）成立。
+
+> ⚠️ 日志里那个 `n_updates` **不是** rollout 次数，而是**每 rollout 记 5 次**的计数器
+> （对应 `n_epochs=5`）。16 envs 下看到的 `n_updates=1220` 是 `5 × 244`，不是 1220 次 rollout。
+> 本报告早期版本曾据此把 `n_steps` 误推为 ~51——**已更正**（见附录 A.1 #8）。
 
 ### 9.2 一次完整的原型迭代 ≈ **82 秒**
 
@@ -567,10 +618,18 @@ def get_walk_backlash_spec(): return MjSpec.from_file(MICRODUCK_WALK_BACKLASH_XM
 1. **没有人验证过 `microduck_local` 训出的 policy 能上真机走。**
    上表是「缺口可闭合」的**推理**，不是实测。真正的证据需要 Week 7 的真机 HIL。
 2. **step 数不可直接等价 —— 这是比第 1 条更根本的问题。**
-   两个 harness 的 env 设计、n_steps（`train-walk` 51 vs 官方 24）、奖励细节都不同，
-   连**单位口径都不一样**（SB3 的 `fps` vs rsl_rl 的 `steps/s`）。
-   跑同样的 step 数**不保证**得到同样质量的 policy。
+   两个 harness 的 env 设计、n_steps（`train-walk` **256** vs 官方 **24**）、奖励细节都不同，
+   连**单位口径都不一样**（SB3 的 `fps` vs rsl_rl 的 `steps/s`），
+   连**每次 rollout 的 batch 都差 12 倍**（见下表）。跑同样的 step 数**不保证**得到同样质量的 policy。
    所以上面那张表证明的**只是「算力够」**，**不是「结果等价」**。
+
+   | | 每次 rollout 收集的样本数 |
+   |---|---:|
+   | `microduck_rl`（官方） | 4096 envs × 24 = **98,304** |
+   | `microduck_local`（32 envs） | 32 envs × 256 = **8,192** |
+
+   PPO 的梯度估计质量与 batch 大小直接相关。**「step 数相同」完全不能推出「每步的
+   优化信号相同」**——这正是「跑 3.9 亿步」不能等价于「跑出同样的策略」的机制性原因。
 
 > **因此「替代」的准确表述是：**
 > - ✅ 已证：`microduck_local` 在 Mac 上**算力足够**过夜跑完同量级 step 预算（~6–8 h）。
@@ -676,6 +735,7 @@ Week 8–9 的算力是**可选**的——云 GPU（保真度基准，1.5 h）�
 | 5 | 「ONNX 导出**未跑通验证**」（外部 review） | **错。已验证两次。** `export-walk` rc=0 → 793,935 B；且 `onnxruntime` 读回确认新导出的与官方 `alpha_walking.onnx` **签名一致** `obs[1,61] → actions[1,14]`，前向推理成功 | 本报告第 6 节；第 9.1 节计时表 |
 | 6 | 「报告没提 `max_iterations` 默认值」（外部 review） | **质疑成立。** 已补三口径对照表（4000 / 6000 / **50,000**）。⚠️ 本报告作者一开始**怀疑这条并查错了**（用 `head -10` 被 roller 任务与 `.pyc` 二进制命中截断），复核后确认外部 review 正确 | `microduck_velocity_env_cfg.py:948` |
 | 7 | 第 3 节的耗时表只有「`rl` on Mac」一列，与第 9.5 节的结论**列不对齐** | **已扩为三口径 × 三路线**（`rl` on Mac / `local` on Mac / 云 GPU），并加三条必读注意（step 数折算 ≠ 等效质量） | 本报告第 3 节 |
+| 8 | 「`train-walk` 的 `n_steps ≈ 51`，1M 步在 16 envs 下是 1220 次 rollout」（本报告作者） | **错，已更正。** 真值 **`n_steps = 256`**（与 `BehaviorEnv` 相同）。1220 是日志里那个**每 rollout 记 5 次**的 `n_updates` 计数器，不是 rollout 次数——rollout 实为 244 次 | `ppo_hparams.N_STEPS = 256`；从 `model.zip` 读出的 `num_timesteps = 102,400`（对 `--steps 100_000`） |
 
 ## A.2 经复核无误的数字
 
@@ -695,7 +755,8 @@ Week 8–9 的算力是**可选**的——云 GPU（保真度基准，1.5 h）�
 
 1. **`local` 训出的策略能否等价上真机** —— 本报告最有分量的一条未证项。需 Week 7 HIL。
 2. **两个 harness 的 step 数不等价** —— 单位口径都不同（SB3 `fps` vs rsl_rl `steps/s`），
-   n_steps 51 vs 24，奖励细节不同。第 9.5 节的表**只证明算力够，不证明结果等价**。
+   n_steps 256 vs 24、每次 rollout 的 batch 差 12 倍（8,192 vs 98,304），
+   奖励细节不同。第 9.5 节的表**只证明算力够，不证明结果等价**。
 3. **`local` 长训练的 reward 曲线** —— 19,000 steps/s 是**吞吐**，不等于**收敛质量**。
 4. **云 NVIDIA 那一行** —— 全部是**由 `microduck_rl/README.md` 口径反推**，非实测。
 5. **`microduck_rl` 的 `scripts/export.py`** —— 与 `local` 的 `export-walk` 是两条路径，
@@ -720,3 +781,45 @@ Week 8–9 的算力是**可选**的——云 GPU（保真度基准，1.5 h）�
 > *"Before believing an EDIT, check the thing you changed is the thing you meant"* ——
 > 以及 *"construct the object and call the method"*。
 > 一个能 parse、能 import 的论断，不等于它说的就是代码在跑的东西。
+
+## A.5 另一类错误：**框架**错了，而每个数字都对
+
+A.1–A.4 讲的都是「某个数字或某条事实错」。**还有一类更隐蔽的错误：报告里每一个数字
+单独看都对，但呈现它们的框架是错的，于是整篇的读者印象被锚住了。**
+
+**实例（由用户发现）：** 本报告第 0 节开头只写
+
+> 「官方 `microduck_rl` … 但**吞吐只有约 950 env steps/sec**，比 CUDA 路线低约两个数量级」
+
+这句话每个字都对。但读者读完第一段，**拿到的印象是「这台 Mac 的吞吐是 950」**——
+而真相是「`microduck_rl` 在这台 Mac 上的吞吐是 950；同机另一个 harness 是 19,000，快 20 倍」。
+全文过一遍后发现 **6 处只写了单边**，其中一处更糟：把 `microduck_rl` CPU 后端的上限
+说成了**这台 Mac 的上限**（「真正的约束是 CPU 并行度，它决定了 ~950 steps/s 的天花板」）——
+一个**听起来有解释力的错误因果**，比单纯漏写更难发现。
+
+**为什么所有既有机制都没抓到它：**
+
+| 机制 | 为什么失效 |
+|---|---|
+| 算术复核 | 每个数都对，没有可复算的错误 |
+| MDE / 显著性 | 不涉及统计判断 |
+| 「回源码复核」 | 源码里确实写着 950（第 3 节实测），复核会**确认**它 |
+| 作者自查 | 我盯着自己刚测的数字看，看不到「我给读者搭了什么框架」 |
+| 外部 review | Claude 复核了算术并确认无误——它审的是数字，不是框架 |
+
+**它能被发现的唯一方式**，是**另一个人从"读者会怎么理解"的角度读一遍**。
+这里正是用户读第一段时问「local 的吞吐呢？」才暴露的。
+
+**可操作的三条对策**（已施加于本报告）：
+
+1. **凡是性能数字，把两个 harness 并排写**，即使某节主题只关心一个——
+   至少在标题或开头声明「本节只针对 X」。
+2. **检查表格的「列」是否跟上了结论的演化**：结论从单一变分层后（A.1 #7），
+   表的列必须同步扩，否则读者按旧列读。
+3. **审计脚本化**：本报告附了一段机械校验——扫全文含吞吐数字的行，
+   检查同行或前 3 行有无 harness 归属标记（第 9 节说明）。回归时跑一遍即可。
+
+> 与 `microduck_local/AGENTS.md` 里那条对应：
+> *"The one failure none of this catches: a favourable framing accepted in silence."*
+> —— 以及它的补充：**"a framing that favours you is exactly the one you will not notice."**
+> 这条只能靠第二个人读，且要给他**证据而不是你的摘要**。

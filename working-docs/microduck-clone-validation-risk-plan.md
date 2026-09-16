@@ -959,7 +959,7 @@ gain_limp = 30
   velocity 任务之间**唯一**的 DR 差异，且都是 `_get_obs` 级别的小改动。
 
 ⚠️ **两条路不可等价互换：** 两个 harness 的 step 数口径不同（SB3 `fps` vs rsl_rl
-`steps/s`，n_steps 51 vs 24），**跑同样步数不保证同样质量**。`microduck_local` 训出的
+`steps/s`，n_steps 256 vs 24，每次 rollout 的 batch 差 12 倍：8,192 vs 98,304），**跑同样步数不保证同样质量**。`microduck_local` 训出的
 策略能否上真机**尚未验证**，需 Week 7 HIL 定论。详见
 `apple-silicon-throughput-benchmark.md` 第 9.5 节与附录 A。
 

@@ -11,32 +11,48 @@
 
 在这台 M5 Max 上，官方 `microduck_rl` 的 MicroDuck velocity 任务可以真实运行
 （物理、奖励、域随机化、61→14 contract 全部完好），但**吞吐只有约 950 env steps/sec**，
-比 CUDA 路线低约两个数量级：
+比 CUDA 路线低约两个数量级。
 
-| | 单次正式训练（4096 envs × 4000 iters ≈ 3.93 亿 env steps） |
-|---|---:|
-| **本机 Mac（M5 Max，CPU 物理）** | **约 115 小时 ≈ 4.8 天** |
-| 云 NVIDIA（`microduck_rl/README.md` 口径） | 约 1–2 小时 |
+**必须同时知道另一半：同一台机器上 `microduck_local`（计划 Week 4/5 实际使用的 harness）
+是 ~19,000 env steps/sec，快 20 倍。** 两个数字分开看都会得出错误结论，
+所以下表两行（加云 GPU 对照共三行）**要一起读**：
 
-> **红线（沿用计划 Week 0.5）：** 本结论及任何「Mac 上能训练」的说法都必须注明当时的
-> `num-envs`。本次最优档是 **1024 envs**；`--num-envs 16` 能跑 ≠ 能做正式训练。
+| 路线（同一台 M5 Max） | 吞吐 | 单次正式训练<br>（3.93 亿 env steps） |
+|---|---:|---:|
+| `microduck_rl`（CPU 模式）—— **本报告第 3 节实测** | **953 steps/s** | **≈ 115 h ≈ 4.8 天**<br>（代码默认 `max_iterations=50_000` 则 ≈ 60 天） |
+| **`microduck_local`（train-walk，BAM+DR）—— 第 9 节实测** | **~19,000 steps/s** | **≈ 5.8 h（过夜）** |
+| 云 NVIDIA `microduck_rl`（`microduck_rl/README.md` 口径 **反推**） | ~73,000 steps/s | 约 1.5 h |
 
-**建议路线：** Mac 保留作为开发 / 验证 / smoke / viewer 机（这条完全没问题），
-正式训练走 NVIDIA（`--hf-jobs` 或租卡）。与计划 R1、Week 8–9 的默认假设一致。
+> **红线（沿用计划 Week 0.5，并补一条）：** 本结论及任何「Mac 上能训练」的说法都必须注明
+> **(a) 当时的 `num-envs`、(b) 用的是哪个 harness**。
+> `--num-envs 16` 能跑 ≠ 能做正式训练；**只写「Mac 950 steps/s」会让人以为这台机器只有这个水平
+> ——实际慢 20 倍的只是 `microduck_rl` 的 CPU 后端（单进程 / 1.06 核），不是这台 Mac。**
 
-> **但这个建议在 9.5 节被放宽了：** `microduck_local` 与 `microduck_rl` 的 DR 缺口只有
-> **3 个可闭合的 obs 级项**，而它在 Mac 上快 20 倍——官方那套 step 预算过夜（~6–8 h）就能跑完。
-> 所以正式训练是**云 GPU（保真度基准）** 或 **Mac 过夜（零成本 MVP）** 两条路，
-> 不是「必须租卡」。见 9.5。
+**建议路线：** Mac 保留作为开发 / 验证 / smoke / viewer 机（这条完全没问题）。
+正式训练有两条路，而非单走云 GPU：
 
-> **No-Go 的范围（重要，见第 9 节）：** 上表 950 steps/s 是 **`microduck_rl`** 在 Mac 上的数字。
-> 计划 Week 4/5 实际使用的 **`microduck_local`** 在同一台机器上是 **~19,000 steps/s（快 20 倍）**，
-> 全部命令实测通过、迭代约 82 秒。**否掉的是「在 Mac 上跑 `microduck_rl` 正式训练」，
-> 不是「Mac 能不能做开发」。**
+| 路线 | 成本 | 耗时 | 定位 |
+|---|---:|---:|---|
+| **A. 云 GPU + 官方 `microduck_rl`** | ~$2–4 / 次 | 1.5 h | 保真度基准，默认推荐 |
+| **B. Mac + `microduck_local` 过夜** | 电费 ~0 | 5.8–8.6 h | 零成本 MVP |
+
+> **口径边界：** `microduck_local` 与 `microduck_rl` 的 DR 缺口只有 **3 个可闭合的 obs 级项**（9.5 节），
+> 但两个 harness 的 **step 数不等价**，「B 路能过夜跑完」**不等于**「能产出与 A 路等价的策略」。
+> 那是**未证命题**，需 Week 7 真机 HIL 定论。见 9.5 与附录 A.3。
 
 ---
 
 ## 1. 测试环境
+
+**本报告涉及两个 harness，都在同一台机器上实测**（这是理解全文的前提）：
+
+| | `microduck_rl` | `microduck_local` |
+|---|---|---|
+| 物理后端 | MuJoCo **Warp**（CPU 模式） | MuJoCo **CPU**（原生 C 引擎） |
+| 并行方式 | 单进程，实测 **1.06 核** | 多进程 fork，实测 **4.92 核** |
+| 训练栈 | mjlab + rsl_rl | Stable Baselines 3 |
+| 本机吞吐 | **953 steps/s** | **~19,000 steps/s** |
+| 本报告章节 | 第 3–6 节 | 第 9 节 |
 
 | 项目 | 值 |
 |---|---|
@@ -46,7 +62,8 @@
 | 内存 | 128 GB |
 | 系统 | macOS 26.6.2 (25G83) |
 | `microduck_rl` | `badc4e7ffe5507fd7acb1a21487bd2925c1afe5a`（CI pinned） |
-| 任务 | `Mjlab-Velocity-Flat-MicroDuck` |
+| `microduck_rl` 任务 | `Mjlab-Velocity-Flat-MicroDuck` |
+| `microduck_local` | 同一 submodule 同一 checkout |
 | `warp-lang` | 1.12.0 |
 | `torch` | 2.9.1（MPS 可用） |
 | 日志 | `working-docs/apple-silicon-bench/logs/` |
@@ -55,21 +72,30 @@
 
 ## 2. 决策表（计划 Week 0.5 要求的那张）
 
-| 平台 | 峰值 num-envs（不 OOM） | 峰值 env steps/sec | 折算单次正式训练 | 单次成本 |
-|---|---:|---:|---:|---:|
-| **本机 Mac（M5 Max）** | **4096**（内存 8.1 GB，远未触顶） | **953** | **≈ 115 h ≈ 4.8 天** | 电费 ~0 |
-| 云 NVIDIA | 待补测 | 待补测 | `microduck_rl/README.md` 口径 ~1–2 h | 待你补测 |
+**本表必须分 harness 写——「Mac 的吞吐」不是单一个数：**
 
-**关于「峰值 num-envs」这一列要特别注意：** 它填 4096 是因为 `4096` **跑得起来**
-（峰值 RSS 仅 8.1 GB / 128 GB），**不是因为它快**。吞吐在 1024 envs 就到顶，
+| 平台 / harness | 峰值 num-envs | 峰值 env steps/sec | 折算单次正式训练 | 单次成本 |
+|---|---:|---:|---:|---:|
+| **本机 Mac + `microduck_rl`**（CPU 模式） | **4096**（内存 8.1 GB，远未触顶） | **953** | **≈ 115 h ≈ 4.8 天** | 电费 ~0 |
+| **本机 Mac + `microduck_local`**（train-walk，BAM+DR） | 32（README 另有 4–64 的曲线） | **~19,000** | **≈ 5.8 h（过夜）** | 电费 ~0 |
+| 云 NVIDIA + `microduck_rl` | 待补测 | 待补测 | `microduck_rl/README.md` 口径 ~1–2 h | 待你补测 |
+
+**关于「峰值 num-envs」这一列要特别注意：** `microduck_rl` 那行填 4096 是因为 4096
+**跑得起来**（峰值 RSS 仅 8.1 GB / 128 GB），**不是因为它快**。它的吞吐在 1024 envs 就到顶，
 之后 env 越多越慢——env 数不提升并行度，只增加调度开销。所以：
 
 - 计划的「不 OOM」判据在这台机器上**不构成约束**（内存从不是瓶颈）；
-- 真正的约束是 **CPU 并行度**，它决定了 ~950 steps/s 的天花板。
+- ⚠️ **但 ~950 steps/s 是 `microduck_rl` CPU 后端的上限，不是这台 Mac 的上限。**
+  实测它只占 **1.06 核**（单进程）；同一台机器上 `microduck_local` 占 **4.92 核**
+  （多进程 fork）且**单核效率高 4.5 倍**，合计 **~19,000 steps/s**。
+  **把 950 当作「Mac 的 CPU 并行度天花板」是错的**——它只是这个 harness 的 CPU 后端上限。
 
 ---
 
-## 3. 吞吐阶梯原始数据
+## 3. 吞吐阶梯原始数据（**`microduck_rl` CPU 模式专属**）
+
+> ⚠️ **本节的 745–953 steps/s 全部是 `microduck_rl` 在 CPU 模式下的数字。**
+> 同机 `microduck_local` 是 ~19,000 steps/s（见第 9 节），**不要把本节读成「Mac 的吞吐」**。
 
 `64 / 256 / 512` 各跑 50 iteration（计时基准），`1024 / 2048 / 4096` 各跑 10 iteration
 （峰值扫描）。全部 0 error、0 traceback。`steps/s = num_envs × 24 ÷ 平均 iteration 耗时`
@@ -179,6 +205,15 @@ ValueError: Invalid device identifier: metal           # Warp 里根本没有 me
 计划 R1 预判的*「MPS 只能加速那个小 MLP 的 policy update，加速不了 Warp 的物理 backend」*
 现在有了数字：**98.35% vs 1.65%**。
 
+> **这个结论对两个 harness 都成立，但含义不同。**
+> 上面的 98.35% 是在 **`microduck_rl`** 上测的；`microduck_local` 的物理是
+> **MuJoCo CPU**（不是 Warp），同样**跑不到 MPS 上**，所以「MPS 加速不了物理」
+> 对两条路一样成立。差别在于：
+> - `microduck_local` 的物理**在 CPU 上本来就够快**（~19,000 steps/s，第 9 节）→ **不需要 GPU**；
+> - `microduck_rl` 的物理在 CPU 上慢（953 steps/s）→ GPU 是它唯一的出路。
+>
+> 换句话说：**MPS 救不了 `microduck_rl`；而 `microduck_local` 不需要被救。**
+
 ### 4.3 真正能改变数量级的选项
 
 | 选项 | 是否能提速 | 说明 |
@@ -258,8 +293,10 @@ BAM actuator、friction DR、backlash、接触求解的数值都要和 CUDA 版�
 
 **务实的中间路线：** 你其实并不需要 Apple 原生才能开发。这台 Mac 已经能做
 开发、viewer、contract 测试、BAM/actuator 参数验证、以及计划 Week 4/5 那种
-1M steps 的小规模冒烟（1M ÷ 950 steps/s ≈ **18 分钟**）——只有最后那次
-4000 iteration 的正式训练需要 GPU。
+1M steps 的小规模冒烟——**用 `microduck_local` 只要 1M ÷ 19,000 ≈ 53 秒**
+（对比：若用 `microduck_rl` 的 CPU 模式，同一步数是 1M ÷ 950 ≈ 18 分钟，慢 20 倍）。
+而且第 9.5 节表明**即便是正式训练量，`microduck_local` 也能过夜跑完**，
+不是只有小规模冒烟能用。
 
 ---
 
@@ -310,7 +347,9 @@ CUDA_VISIBLE_DEVICES="" WANDB_MODE=disabled \
 
 ## 6. 功能正确性核查（计划要求「不能只看代码能跑」）
 
-计划 Week 0.5 要求区分「功能正确性」与「吞吐可行性」。CPU 模式下逐条核对：
+计划 Week 0.5 要求区分「功能正确性」与「吞吐可行性」。下面是 **`microduck_rl` 在 CPU 模式**下
+（即 `CUDA_VISIBLE_DEVICES=""`，吞吐 953 steps/s）逐条核对——**这一节只针对 `microduck_rl`**；
+`microduck_local` 的对应核查见第 9 节：
 
 | 检查项 | 结果 | 证据 |
 |---|---|---|
@@ -325,7 +364,9 @@ CUDA_VISIBLE_DEVICES="" WANDB_MODE=disabled \
 | 与 CUDA 小规模 run 行为接近 | ⚠️ 未验证 | 需要云 GPU 对照，见第 8 节 |
 
 **小结：** 功能侧的核心不变量（物理、BAM、DR、61→14、normalizer）在 CPU 模式下**全部成立**，
-没有出现计划警告的「偷偷退化物理模型」。所以 No-Go 的理由**纯粹是吞吐**，不是正确性。
+没有出现计划警告的「偷偷退化物理模型」。所以 **`microduck_rl`-on-Mac 的 No-Go 理由
+纯粹是吞吐**（953 steps/s × 1.06 核），不是正确性——这一点很重要，因为它意味着
+「换一个 harness（`microduck_local`）」就能拿到同一台机器上 20 倍的吞吐（第 9 节）。
 
 ---
 
@@ -588,8 +629,9 @@ Week 8–9 的算力是**可选**的——云 GPU（保真度基准，1.5 h）�
 - `CUDA_VISIBLE_DEVICES=""` 触发 mjlab 自带的 CPU 模式（`gpu.py:56`）；
 - **MPS 无用**：物理占 iteration **98.35%**，且 Warp 无 Metal 后端 + `mujoco_warp` CUDA-only
   + `libwarp.dylib` 里 metal 符号 0 个（三条独立证据）；
-- 吞吐在 **1024 envs 触顶 953 steps/s**，内存从不是瓶颈（4096 envs 峰值 8.1 GB）；
-- 结论 **No-Go**（针对 `rl`-on-Mac）不受任何一轮修正影响。
+- **`microduck_rl`** 的吞吐在 **1024 envs 触顶 953 steps/s**，内存从不是瓶颈（4096 envs 峰值 8.1 GB）；
+  同机 **`microduck_local`** 为 ~19,000 steps/s（4.92 核，单核效率 4.5×）；
+- 结论 **No-Go**（针对 `microduck_rl`-on-Mac）不受任何一轮修正影响。
 
 ## A.3 仍未证的命题（请勿在后续引用中读成已证）
 

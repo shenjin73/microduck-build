@@ -11,7 +11,7 @@
 
 1. **执行器模型不匹配**：官方策略和 `microduck_rl` 的 sim2real 核心围绕 Dynamixel XL330 + BAM M6 参数建立。换电机会直接改变力矩、电流限制、速度、延迟、摩擦、齿隙、编码器读数和热保护。
 2. **运行时硬件接口不兼容**：官方 `microduck` runtime 当前代码是 `DynamixelIo`，使用 `rustypot::servo::dynamixel::xl330::Xl330Controller`，读写 XL330 寄存器。Feetech HD 系列即使也是串口总线舵机，也大概率不能直接跑原 runtime。
-3. **Apple Silicon 限制是真的，但要更精确地表述**：`microduck_rl` 官方训练路径依赖 MuJoCo Warp + CUDA，Mac/Apple Silicon 不能等价替代官方 NVIDIA/CUDA 大规模训练。Mac 可以跑 `microduck_local` CPU harness 做验证/小规模训练/可视化，也可以尝试把训练改成 CPU/MPS fallback；但这必须通过吞吐、reward、BAM parity、ONNX contract 和 HIL 验证，不能只以“代码能跑”为成功标准。最终高质量 sim2real 仍建议保留 NVIDIA GPU 或 HF Jobs 路线作为基准。
+3. **Apple Silicon 限制是真的，但要更精确地表述**：`microduck_rl` 官方训练路径依赖 MuJoCo Warp + CUDA，Mac/Apple Silicon 不能等价替代官方 NVIDIA/CUDA 大规模训练。Mac 可以跑 `microduck_local` CPU harness 做验证/小规模训练/可视化，也可以尝试把训练改成 CPU/MPS fallback；但这必须通过吞吐、reward、BAM parity、ONNX contract 和 HIL 验证，不能只以“代码能跑”为成功标准。最终高质量 sim2real 仍建议保留 NVIDIA GPU 或 HF Jobs 路线作为基准。**这一点应在采购硬件前就用数字定论——见 Week 0.5 的 Apple Silicon 吞吐前置验证（Go/No-Go）。**
 4. **机械“外形尺寸一致”不足以免改仿真**：即使外壳尺寸相同，质量、惯量、轴心/安装偏移、输出盘厚度、限位、齿隙、线缆/连接板重量都会影响 800g 小双足；需要实测并更新 MJCF/DR。
 5. **`custom-motor-guide.md` 有多处需要修正**：尤其是 BAM motor_name、系统辨识命令、`microduck_local` 参数接入、`--init-from ONNX`、以及把 `infer_policy.py` 当作真机部署测试。
 
@@ -636,6 +636,54 @@ obs[1,61] -> action[1,14]
 3. 供电是 2S Li-ion 6.6–8.4V 还是别的？
 4. 是否保持 15 个舵机，其中 mouth 不进 policy？
 
+### Week 0.5：Apple Silicon 吞吐前置验证（采购硬件前必做的 Go/No-Go）
+
+**为什么前置：** 「Apple Silicon 能否替代 NVIDIA 做正式训练」是整个项目里风险/回报比最不对称、且**完全不依赖任何硬件**的一步。它决定后面所有训练要押在本地 Mac 还是云 GPU 上。与其拖到 Week 8–9 才发现 Mac 吞吐不够、被迫返工，不如现在——**在下单 HD-1910 之前**——用官方 `microduck_rl` 的现成 MicroDuck 环境把这个数字测出来。这一步不需要 clone physics、不需要 connector board、不需要真机。
+
+**关键认知：要验证的是两件独立的事，不要混为一谈。**
+
+1. **功能正确性（软件）**：MPS/CPU 后端下 `microduck_rl` 是否仍在真正跑物理仿真——没偷偷把 BAM actuator 退回 XML actuator、没关掉关键 domain randomization、observation/action contract 仍是 61→14。
+2. **吞吐可行性（决定成败）**：Apple Silicon 的 **env steps/sec** 够不够支撑官方正式训练量（`--num-envs 4096 --max-iterations 4000` 量级）。**这一条才是「能不能替代 NVIDIA」的判据。**
+
+**预期结论（需要用数字证实/证伪）：** 官方路线的瓶颈不是神经网络前后向，而是 **MuJoCo Warp 在 CUDA 上对几千个环境的并行物理步进**。MPS 只能加速那个小 MLP 的 policy update，**加速不了 Warp 的 CUDA 物理 backend**——在 Apple 上所谓 MPS fallback 实际是把物理仿真退回 CPU、env 数从 4096 掉到几十。因此最可能的结论是：**功能上能跑，吞吐上差 1–2 个数量级，不适合当正式基准。** 本步骤的目的就是把这个「1–2 个数量级」变成一个具体的天数/成本数字。
+
+**操作步骤（在这台 Mac 上直接做）：**
+
+```bash
+cd microduck-lab/microduck_rl
+
+# 0. 先确认环境能否安装（Warp/CUDA 依赖是否直接卡住 uv sync）
+uv sync
+
+# 1. torch/MPS 可用性
+uv run python -c "import torch; print('mps=', torch.backends.mps.is_available())"
+
+# 2. 最小 smoke：能否真正跑 rollout + PPO update
+uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 16 --agent.max_iterations 5
+
+# 3. 吞吐扫描：逐档记录 env steps/sec 与是否 OOM
+uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 64  --agent.max_iterations 50
+uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 256 --agent.max_iterations 50
+uv run train Mjlab-Velocity-Flat-MicroDuck --env.scene.num-envs 512 --agent.max_iterations 50
+```
+
+**决策表（填完这张表才算完成本步）：**
+
+| 平台 | 峰值 num-envs（不 OOM） | env steps/sec | 折算单次正式训练耗时 | 单次成本 |
+|---|---:|---:|---:|---:|
+| 本机 Mac（Apple Silicon） | ？ | ？ | ？ 天 | 电费 ~0 |
+| 云 NVIDIA（Vast/Lambda 租 1h 4090 或 A100 跑同样 smoke 对照） | ？ | ？ | ？ 小时 | $？ |
+
+拿到两行数字后，「能不能替代」就不再是主观判断，而是「你愿不愿意为省 $Z 多等 (X_Mac − Y_GPU) 的时间」。
+
+**Go/No-Go 判定标准：**
+
+- **允许把 Apple Silicon 当正式训练路线**，当且仅当：在**不弱化 BAM actuator、不关闭关键 domain randomization、contract 保持 61→14** 的前提下，Mac 折算出的单次训练时间可接受（例如目标 ≤ 你能容忍的天数）。
+- **否则默认结论：Mac 只用于开发/验证/小规模 smoke，正式训练走 NVIDIA/HF Jobs。** 这也是文档其余部分的基准假设（见 R1、Week 8–9）。
+- **红线：** 任何「Mac 上能训练」的结论必须注明当时的 `num-envs`。`--num-envs 16` 能跑 ≠ 能做正式训练——降 env 数换「能跑」不算通过。
+
+**交付物：** `working-docs/apple-silicon-throughput-benchmark.md`，含上面填好的决策表、每档 steps/sec 原始数据、以及一句明确的 Go/No-Go 结论。
+
 ### Week 1：硬件接口 spike：单电机 + 总线
 
 **目标：** 证明主板能稳定控制一个 HD-1910。
@@ -866,9 +914,11 @@ gain_limp = 30
 
 ### Week 8–9：正式训练阶段：NVIDIA 基准路线 + Apple Silicon fallback 验证
 
-**目标：** 用 clone physics 训练可部署 gait。推荐仍把 NVIDIA/CUDA 作为最终基准路线，同时允许 Apple Silicon 作为 fallback/实验路线，但必须通过验证后才能替代。
+**目标：** 用 clone physics 训练可部署 gait。
 
-#### 路线 A：NVIDIA GPU / HF Jobs 基准训练
+**前提：** 路线选择应在 **Week 0.5** 已经用数字定下——如果 Apple Silicon 吞吐前置验证判定为 No-Go（预期的默认结论），本阶段直接走路线 A，路线 B 只作实验，不要在这里才重新纠结「能不能用 Mac」。这里训练用的是 clone physics（BAM/质量/摩擦已按前几周测量更新），env 环境与 Week 0.5 的官方基准环境不同，但吞吐结论沿用 Week 0.5。
+
+#### 路线 A：NVIDIA GPU / HF Jobs 基准训练（默认基准）
 
 ```bash
 cd microduck-lab/microduck_rl
@@ -881,7 +931,7 @@ uv run train Mjlab-Velocity-Flat-MicroDuck \
 
 #### 路线 B：Apple Silicon fallback 训练验证
 
-如果已经把 `microduck_rl` 改到了 CPU/MPS backend，先不要直接跑大训练，按顺序验证：
+仅在 **Week 0.5 判定 Go**、或作为实验对照时才走这条。若已把 `microduck_rl` 改到 CPU/MPS backend，先不要直接跑大训练，按顺序验证（与 Week 0.5 的检查同源，这里换成 clone physics 环境再确认一遍）：
 
 ```bash
 cd microduck-lab/microduck_rl

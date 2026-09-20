@@ -1,7 +1,7 @@
 # Microduck 复制品：`custom-motor-guide.md` 校验、风险清单与实施计划
 
 日期：2026-09-16  
-范围：基于当前 `microduck-build` 工作区内的 `microduck-lab` submodule，对 `working-docs/custom-motor-guide.md` 做源码级校验，并给出复制 Microduck 时在电机、主板/连接板、仿真、训练、部署上的风险与路线图。
+范围：基于当前 `microduck-build` 工作区内的 `reference/microduck-lab` submodule，对 `working-docs/custom-motor-guide.md` 做源码级校验，并给出复制 Microduck 时在电机、主板/连接板、仿真、训练、部署上的风险与路线图。
 
 ---
 
@@ -29,26 +29,26 @@
 主要看了这些文件：
 
 - `working-docs/custom-motor-guide.md`
-- `microduck-lab/microduck_rl/README.md`
-- `microduck-lab/microduck_rl/AGENTS.md`
-- `microduck-lab/microduck_rl/pyproject.toml`
-- `microduck-lab/microduck_rl/src/mjlab_microduck/robot/microduck_constants.py`
-- `microduck-lab/microduck_rl/src/mjlab_microduck/actuator/friction_dr_bam.py`
-- `microduck-lab/microduck_local/README.md`
-- `microduck-lab/microduck_local/AGENTS.md`
-- `microduck-lab/microduck_local/src/microduck_local/bam_actuator.py`
-- `microduck-lab/microduck_local/src/microduck_local/walk_env.py`
-- `microduck-lab/microduck_local/src/microduck_local/contract.py`
-- `microduck-lab/microduck/README.md`
-- `microduck-lab/microduck/duck-control/src/bus.rs`
-- `microduck-lab/microduck/duck-control/src/model.rs`
-- `microduck-lab/microduck/deploy/robotd.toml`
-- `microduck-lab/microduck/docs/design/architecture.md`
-- `microduck-lab/microduck/docs/design/robotd-design.md`
-- `microduck-lab/microduck/docs/project/media-bringup.md`
-- `microduck-lab/microduck/docs/project/npu-bringup.md`
+- `reference/microduck-lab/microduck_rl/README.md`
+- `reference/microduck-lab/microduck_rl/AGENTS.md`
+- `reference/microduck-lab/microduck_rl/pyproject.toml`
+- `reference/microduck-lab/microduck_rl/src/mjlab_microduck/robot/microduck_constants.py`
+- `reference/microduck-lab/microduck_rl/src/mjlab_microduck/actuator/friction_dr_bam.py`
+- `reference/microduck-lab/microduck_local/README.md`
+- `reference/microduck-lab/microduck_local/AGENTS.md`
+- `reference/microduck-lab/microduck_local/src/microduck_local/bam_actuator.py`
+- `reference/microduck-lab/microduck_local/src/microduck_local/walk_env.py`
+- `reference/microduck-lab/microduck_local/src/microduck_local/contract.py`
+- `reference/microduck-lab/microduck/README.md`
+- `reference/microduck-lab/microduck/duck-control/src/bus.rs`
+- `reference/microduck-lab/microduck/duck-control/src/model.rs`
+- `reference/microduck-lab/microduck/deploy/robotd.toml`
+- `reference/microduck-lab/microduck/docs/design/architecture.md`
+- `reference/microduck-lab/microduck/docs/design/robotd-design.md`
+- `reference/microduck-lab/microduck/docs/project/media-bringup.md`
+- `reference/microduck-lab/microduck/docs/project/npu-bringup.md`
 
-另外实际运行了 `microduck-lab/scripts/setup.sh`，当前环境能装好 `microduck_rl`、`microduck`、policies，并且 smoke tests 通过：`55 passed`。
+另外实际运行了 `reference/microduck-lab/scripts/setup.sh`，当前环境能装好 `microduck_rl`、`microduck`、policies，并且 smoke tests 通过：`55 passed`。
 
 ---
 
@@ -312,7 +312,7 @@ device = "mps"
 **Mac 上推荐先跑的路线：**
 
 ```bash
-cd microduck-lab/microduck_local
+cd reference/microduck-lab/microduck_local
 
 uv run train-walk \
   --envs 16 \
@@ -338,7 +338,7 @@ uv run train-walk \
 **如果要验证 DeepSeek/其他工具改出的 `microduck_rl` Apple 版，必须跑这些检查：**
 
 ```bash
-cd microduck-lab/microduck_rl
+cd reference/microduck-lab/microduck_rl
 
 # 1. 检查 torch/MPS 可用性
 uv run python -c "import torch; print('mps=', torch.backends.mps.is_available())"
@@ -381,7 +381,7 @@ uv run train Mjlab-Velocity-Flat-MicroDuck \
 3. 每个长训练前必须先跑小 smoke：
 
 ```bash
-cd microduck-lab/microduck_rl
+cd reference/microduck-lab/microduck_rl
 uv run train Mjlab-Velocity-Flat-MicroDuck \
   --env.scene.num-envs 64 \
   --agent.max_iterations 5
@@ -390,7 +390,7 @@ uv run train Mjlab-Velocity-Flat-MicroDuck \
 NVIDIA/HF Jobs 正式训练示例：
 
 ```bash
-cd microduck-lab/microduck_rl
+cd reference/microduck-lab/microduck_rl
 uv run train Mjlab-Velocity-Flat-MicroDuck \
   --env.scene.num-envs 4096 \
   --agent.max_iterations 4000 \
@@ -679,7 +679,7 @@ obs[1,61] -> action[1,14]
 **操作步骤（在这台 Mac 上直接做）：**
 
 ```bash
-cd microduck-lab/microduck_rl
+cd reference/microduck-lab/microduck_rl
 
 # 0. 先确认环境能否安装（Warp/CUDA 依赖是否直接卡住 uv sync）
 uv sync
@@ -810,7 +810,7 @@ battery, ..., ..., ..., ..., update trunk mass/com
 
 ```bash
 # 安装 BAM fitting 额外依赖；当前 pyproject 没带这些
-cd microduck-lab/microduck_rl
+cd reference/microduck-lab/microduck_rl
 uv pip install optuna wandb pypot dynamixel-sdk
 
 # raw -> processed
@@ -852,7 +852,7 @@ _BAM_ACTUATOR_KWARGS = dict(
 命令：
 
 ```bash
-cd microduck-lab/microduck_local
+cd reference/microduck-lab/microduck_local
 uv run --with pytest pytest tests/test_env_contract.py tests/test_walk_env_physics.py tests/test_bam_actuator.py -q
 
 # 官方策略在 clone physics 下回放，只作为敏感性测试
@@ -873,7 +873,7 @@ cd ../duck-viewer && npm run dev
 **目标：** 不花 GPU 钱，先确认 reward/physics 没明显问题。
 
 ```bash
-cd microduck-lab/microduck_local
+cd reference/microduck-lab/microduck_local
 uv run train-walk \
   --envs 16 \
   --steps 1_000_000 \
@@ -968,7 +968,7 @@ gain_limp = 30
 #### 路线 A：NVIDIA GPU / HF Jobs 基准训练（默认基准）
 
 ```bash
-cd microduck-lab/microduck_rl
+cd reference/microduck-lab/microduck_rl
 uv run train Mjlab-Velocity-Flat-MicroDuck \
   --env.scene.num-envs 4096 \
   --agent.max_iterations 4000 \
@@ -989,7 +989,7 @@ IMU 安装误差 ±6°、编码器 bias ±0.015 rad、IMU 延迟 0–1 步。
 # microduck_local 的原生单位是 --steps（不是 --iterations）。
 # 下例用与官方同量级的 step 预算（≈3.9 亿）作起点；step 数两栈不等价，
 # 实际收敛步数需按 reward 曲线调整，不要当成已校准的配方。
-cd microduck-lab/microduck_local
+cd reference/microduck-lab/microduck_local
 uv run train-walk --envs 32 --steps 390_000_000 --actuator bam --run-name clone-walk-v1
 uv run export-walk runs/clone-walk-v1
 uv run render-rollout --policy runs/clone-walk-v1/policy.onnx --behavior run --out /tmp/clone-walk
@@ -999,7 +999,7 @@ uv run render-rollout --policy runs/clone-walk-v1/policy.onnx --behavior run --o
 先不要直接跑大训练，按顺序验证（与 Week 0.5 的检查同源，这里换成 clone physics 环境再确认一遍）：
 
 ```bash
-cd microduck-lab/microduck_rl
+cd reference/microduck-lab/microduck_rl
 uv run python -c "import torch; print('mps=', torch.backends.mps.is_available())"
 
 uv run train Mjlab-Velocity-Flat-MicroDuck \

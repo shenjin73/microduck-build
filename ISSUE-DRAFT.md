@@ -9,7 +9,7 @@
 
 | | |
 |---|---|
-| `microduck-lab` | `3f788f3` (2026-09-11) |
+| `reference/microduck-lab` | `3f788f3` (2026-09-11) |
 | `microduck_rl` (pinned) | `badc4e7` |
 | `microduck` (pinned) | `2c61dcc` |
 | Machine | Apple M5 Max, 18 cores (6P + 12E), macOS 26.6.2 |

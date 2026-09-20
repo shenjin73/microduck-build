@@ -90,5 +90,5 @@ htop
 ## 相关文档
 
 - `hardware-open-questions.md` — B1 主板项（已由本日志定案）
-- `microduck-lab/microduck/docs/robot/install-dev.md` — 官方 provisioning 流程
-- `microduck-lab/microduck/docs/project/media-bringup.md` / `npu-bringup.md` — 媒体/NPU 验证记录
+- `reference/microduck-lab/microduck/docs/robot/install-dev.md` — 官方 provisioning 流程
+- `reference/microduck-lab/microduck/docs/project/media-bringup.md` / `npu-bringup.md` — 媒体/NPU 验证记录

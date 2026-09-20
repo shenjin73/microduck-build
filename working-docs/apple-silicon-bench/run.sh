@@ -12,7 +12,7 @@
 # Usage: ./run.sh 64 256 512
 set -uo pipefail
 
-RL="$HOME/Projects/microduck-build/microduck-lab/microduck_rl"
+RL="$HOME/Projects/microduck-build/reference/microduck-lab/microduck_rl"
 OUT="$(cd "$(dirname "$0")" && pwd)/logs"
 ITERS="${ITERS:-50}"
 mkdir -p "$OUT"

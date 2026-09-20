@@ -78,11 +78,48 @@ if not scene.exists():
 **置信度：高**（代码可查）。
 **什么会推翻它**：上游改了目录约定 —— 那时跟着改。
 
+> **2026-09-20 补记：本条已部分修订，见下条。** 约束本身仍然成立，但适用范围被收窄了 ——
+> 它约束的是 `microduck-lab` **内部**那四份并排 checkout 的相互位置，不是它们所在的父目录。
+
+---
+
+## 2026-09-20 · 三个上游 checkout 收进 `reference/`
+
+**决定**：`microduck-lab` / `microduck-replica` / `elec_RPI_Robot_HAT` 移到 `reference/` 下。
+
+**为什么安全**：上条的约束是"**四份并排的 checkout 不能拆开**"，而不是"父目录不能动"。关键事实是
+`microduck_rl` 和 `microduck` 都在 `microduck-lab/` **里面**，不在它旁边：
+
+```
+microduck-lab/
+├── microduck_local/   ← lab 自己跟踪
+├── microduck_rl/      ← 嵌套独立 repo（lab 已忽略）
+├── microduck/         ← 嵌套独立 repo（lab 已忽略）
+└── duck-viewer/
+```
+
+所以代码里的 `../microduck_rl`（相对 cwd）和 `parents[3] / "microduck_rl"`（相对文件位置）
+**只依赖 `microduck-lab` 内部的相对层级，不依赖父目录叫什么名字**。整体移动 `microduck-lab/`
+不会改变任何一对相对位置。上条防的是"只把 `microduck_rl/` 挪走"这类拆散操作。
+
+**同时做了**：`microduck-lab` 从 submodule 改为**普通本地副本**，与 `microduck-replica` /
+`elec_RPI_Robot_HAT` 统一。做法是把 `.git/modules/microduck-lab` 搬成
+`reference/microduck-lab/.git`，并清掉残留的 `core.worktree`。三者现在都是自包含克隆，
+`reference/` 整体被 gitignore。
+
+**代价**：失去 submodule 的版本锁定 —— clone 本仓库的人不会自动拿到这三个 checkout。
+考虑到它们的角色是**只读参考、不参与构建**，这个代价可以接受。
+
+**连带更新**：69 处路径引用（含 3 个会真正执行的 shell 脚本）。
+
+**置信度：高**（相对路径行为已实测）。
+**什么会推翻它**：上游把四份 checkout 的约定改成"必须并排在某个固定父目录下"。
+
 ---
 
 ## 2026-09-15 · 文档独立成 repo，不放进任何 clone
 
-**决定**：路线图、决策日志、台架记录放在 `~/Projects/microduck-build/`，**不放进** `microduck` 或 `microduck-lab`。
+**决定**：路线图、决策日志、台架记录放在 `~/Projects/microduck-build/`，**不放进** `microduck` 或 `reference/microduck-lab`。
 
 **为什么**：
 

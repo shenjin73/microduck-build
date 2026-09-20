@@ -1,6 +1,6 @@
 # elec_RPI_Robot_HAT — 嘉立创（jlc.com 国内站）下单清单
 
-来源：`elec_RPI_Robot_HAT` submodule @ `88d51fa`，production/ 为原厂 C1 批次量产文件
+来源：`reference/elec_RPI_Robot_HAT` 本地参考副本 @ `88d51fa`，production/ 为原厂 C1 批次量产文件
 （原厂提交：`[update] Release C1 (for Grabette), now qtty 20 @JLCPCB`）
 
 ## 上传文件（共 3 个）

@@ -2,5 +2,6 @@ runs/
 docs/bench/*.npz
 docs/bench/*.json
 .DS_Store
-microduck-replica/
-elec_RPI_Robot_HAT/
+
+# 三个上游参考 checkout（本地副本，不纳入版本管理）
+reference/

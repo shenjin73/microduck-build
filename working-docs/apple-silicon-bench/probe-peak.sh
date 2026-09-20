@@ -9,7 +9,7 @@
 # Usage: ./probe-peak.sh 1024 2048 4096
 set -uo pipefail
 
-RL="$HOME/Projects/microduck-build/microduck-lab/microduck_rl"
+RL="$HOME/Projects/microduck-build/reference/microduck-lab/microduck_rl"
 OUT="$(cd "$(dirname "$0")" && pwd)/logs"
 ITERS="${ITERS:-10}"
 mkdir -p "$OUT"

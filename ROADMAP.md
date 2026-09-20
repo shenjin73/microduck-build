@@ -91,7 +91,7 @@
 一颗舵机 + 已知惯量臂，跑固定目标序列，sim（BAM M6 作为起点）vs 实测对比。
 
 ```bash
-cd ~/Projects/microduck-lab/microduck_rl
+cd ~/Projects/microduck-build/reference/microduck-lab/microduck_rl
 uv run python scripts/testbench_sim2real.py --mode sim  --onnx p.onnx --out sim.npz
 uv run python scripts/testbench_sim2real.py --mode real --onnx p.onnx --out real.npz \
     --port /dev/cu.usbserial-XXXX      # macOS 不是 /dev/ttyUSB0
@@ -135,7 +135,7 @@ uv run python scripts/testbench_sim2real.py --compare sim.npz real.npz --out-plo
 
 **两套架构，别混：**
 
-| | 本地 `microduck-lab` | 云端 `microduck_rl` |
+| | 本地 `reference/microduck-lab` | 云端 `microduck_rl` |
 |---|---|---|
 | 用途 | **reward 设计、课程、快速试错** | **正式训练** |
 | 反馈 | 分钟级 | 小时级 |
@@ -156,7 +156,7 @@ uv run python scripts/testbench_sim2real.py --compare sim.npz real.npz --out-plo
 
 ```bash
 # 本地：分钟级试 reward
-cd ~/Projects/microduck-lab/microduck_local
+cd ~/Projects/microduck-build/reference/microduck-lab/microduck_local
 uv run train-behavior run --envs 24 --steps 3_000_000 --run-name proto
 uv run render-rollout --policy runs/proto/policy.onnx --out /tmp/rr   # 看图，别看曲线
 
@@ -202,7 +202,7 @@ cd ../microduck_rl && uv run train Mjlab-Velocity-Flat-MicroDuck \
 | 电流预算超（30 A vs 接口 3 A max） | 🔴 | 阶段 1 就重算线径和接口分配 |
 | 跑步做不到 | 🟡 | L3 是研究不是移植；设止损停在 L2 |
 | 机械改动引入新回差 | 🟡 | 阶段 3 实测，喂回 backlash 模型 |
-| 从零训练烧钱不收敛 | 🟡 | 本地先用 `microduck-lab` 把 reward 调对再上云 |
+| 从零训练烧钱不收敛 | 🟡 | 本地先用 `reference/microduck-lab` 把 reward 调对再上云 |
 
 ---
 

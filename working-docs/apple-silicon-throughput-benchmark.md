@@ -413,7 +413,7 @@ CUDA_VISIBLE_DEVICES="" WANDB_MODE=disabled \
 
 ```bash
 # 一次性环境（本仓库根目录）
-cd microduck-lab && ./scripts/setup.sh
+cd reference/microduck-lab && ./scripts/setup.sh
 
 # 计时基准（64/256/512，各 50 iters，顺序执行避免互相抢 CPU）
 cd ../working-docs/apple-silicon-bench && ITERS=50 ./run.sh 64 256 512
@@ -422,7 +422,7 @@ cd ../working-docs/apple-silicon-bench && ITERS=50 ./run.sh 64 256 512
 ITERS=10 ./probe-peak.sh 1024 2048 4096
 
 # MPS 收益上限
-cd ../../microduck-lab/microduck_rl && uv run python \
+cd ../../reference/microduck-lab/microduck_rl && uv run python \
   ../../working-docs/apple-silicon-bench/mps_ceiling.py
 ```
 

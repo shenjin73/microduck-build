@@ -29,7 +29,7 @@
 一颗舵机 + 已知惯量臂，跑固定目标序列，**sim（以 BAM M6 为起点）vs 实测**对比。
 
 ```bash
-cd ~/Projects/microduck-lab/microduck_rl
+cd ~/Projects/microduck-build/reference/microduck-lab/microduck_rl
 
 # 1) sim 侧（BAM M6，200 Hz 日志）
 uv run python scripts/testbench_sim2real.py --mode sim --onnx policy.onnx --out sim.npz

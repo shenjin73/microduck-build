@@ -2,7 +2,7 @@
 # Times each Week 4/5 command from the clone plan on this Mac.
 # Full output goes to /tmp/w45-*.log; only timings are printed here.
 set -uo pipefail
-cd "$HOME/Projects/microduck-build/microduck-lab/microduck_local"
+cd "$HOME/Projects/microduck-build/reference/microduck-lab/microduck_local"
 L=/tmp/w45
 
 run() {                    # run <label> <cmd...>

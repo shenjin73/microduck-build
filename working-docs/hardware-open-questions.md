@@ -12,7 +12,7 @@
 | 类别 | 项数 | 已确认 | 阻塞的后续阶段 |
 |---|---:|---:|---|
 | A. HD-1910 供应商问题 | 24 | 0 | **Week 1**（单电机 spike）→ Week 3（BAM 辨识）→ Week 6（runtime） |
-| B. 自查决策项 | 5 | 0 | Week 0（边界冻结）、Week 2（MJCF）、Week 8–9（训练） |
+| B. 自查决策项 | 5 | 1（B1 主板） | Week 0（边界冻结）、Week 2（MJCF）、Week 8–9（训练） |
 | C. 机械 CAD / BOM | 4 | 0 | **Week 2**（机械参数测量） |
 
 ---
@@ -143,17 +143,12 @@ TTL 总线，1 Mbps，控制回路 50 Hz）。资料图上的机械/电气参数
 
 这 5 项不需要问别人，是你自己的选择。每项都给出「选项 → 解锁什么 / 代价是什么」。
 
-## B1. 主板型号
+## B1. 主板型号 ✅ 已定案（2026-09-20）
 
-| 选项 | 解锁 | 代价 |
-|---|---|---|
-| **A. 沿用 Radxa Zero 3W / RK3566**（推荐） | 官方 runtime 的 board-specific 工作全部复用：UART overlay、NPU overlay、Rockchip MPP、GStreamer、ONNX Runtime、systemd units | 需确认供应与价格 |
-| B. 其他 Linux ARM 板（保留 UART/CSI/NPU/VPU） | 灵活性 | 重做全部 deploy scripts；CSI/NPU 驱动可能要自己搞 |
-| C. ESP32/MCU + 外置 AI 板 | — | 需重写 runtime 架构，**不建议第一版** |
-
-**需要确认的**：具体型号、是否有 **CSI、NPU/VPU、可用 UART（含 DMA）、Linux 支持程度**。
-
-> 风险计划 §R5 的判断：换主板的代价远大于换电机——因为 runtime 里有大量 board-specific 工作。
+**已定：Radxa Zero 3W（RK3566）**——官方 MicroDuck 原板，选项 A。板子已到货并点亮
+（2GB/无 eMMC/带排针，Armbian 26.8.1 Minimal + vendor 6.1.115 内核基线验证通过，
+provisioning 未跑）。选型论证、图像/声音识别对主板的要求、备选型号对比（OPi 3B/5B、
+命名陷阱清单）与 bring-up 进展详见 **`working-docs/zero3w-bringup-log.md`**。
 
 ## B2. 连接板目标
 

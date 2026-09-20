@@ -3,3 +3,4 @@ docs/bench/*.npz
 docs/bench/*.json
 .DS_Store
 microduck-replica/
+elec_RPI_Robot_HAT/

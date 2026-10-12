@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>FT SCServo Debug · 网页版</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font: 12px/1.5 "PingFang SC", "Microsoft YaHei", sans-serif; background: #f0f0f0; color: #000; }
+  #head { background: #e8e8e8; border-bottom: 1px solid #999; padding: 4px 10px; display: flex; align-items: center; gap: 12px; }
+  #head b { font-size: 13px; }
+  .tab { display: inline-block; padding: 4px 22px; border: 1px solid #999; border-bottom: none; background: #e0e0e0; cursor: default; }
+  .tab.on { background: #fff; font-weight: bold; }
+  .tab.off { color: #999; }
+  #tabs { padding: 6px 10px 0; background: #e8e8e8; }
+  #main { display: flex; gap: 6px; padding: 6px; }
+  .col { display: flex; flex-direction: column; gap: 6px; }
+  .panel { background: #fff; border: 1px solid #999; padding: 6px 8px; }
+  .panel h3 { font-size: 12px; border-bottom: 1px solid #ccc; margin-bottom: 5px; padding-bottom: 2px; }
+  .row { display: flex; align-items: center; gap: 5px; margin: 4px 0; }
+  .row label { width: 52px; text-align: right; white-space: nowrap; }
+  select, input[type=text], input[type=number] { border: 1px solid #999; padding: 2px 4px; background: #fff; font: inherit; }
+  button { border: 1px solid #777; background: linear-gradient(#fafafa, #dcdcdc); padding: 3px 14px; cursor: pointer; font: inherit; }
+  button:active { background: #ccc; }
+  button:disabled { color: #999; cursor: default; }
+  #servoList { width: 100%; border-collapse: collapse; }
+  #servoList th, #servoList td { border-bottom: 1px solid #ddd; padding: 2px 4px; text-align: left; }
+  #servoList tbody tr { cursor: pointer; }
+  #servoList tr.sel { background: #3875d7; color: #fff; }
+  #chartWrap { position: relative; }
+  canvas { display: block; background: #fff; border: 1px solid #999; width: 100%; }
+  .fb { display: flex; }
+  .fb > div { flex: 1; }
+  .fb .k { color: #555; }
+  .fb .v { font-weight: bold; }
+  .legend label { display: flex; align-items: center; gap: 4px; margin: 2px 0; }
+  .sw { width: 22px; height: 8px; display: inline-block; }
+  input[type=range] { width: 130px; }
+  #status { background: #e8e8e8; border-top: 1px solid #999; padding: 2px 10px; position: fixed; bottom: 0; left: 0; right: 0; }
+  .warn { color: #c00; }
+</style>
+</head>
+<body>
+<div id="head"><b>FT SCServo Debug</b><span id="headInfo" class="warn"></span></div>
+<div id="tabs">
+  <span class="tab on">调试</span><span class="tab off" title="暂不支持">编程</span><span class="tab off" title="暂不支持">升级</span><span class="tab off" title="暂不支持">PWM</span>
+</div>
+<div id="main">
+  <!-- 左栏 -->
+  <div class="col" style="width:200px">
+    <div class="panel"><h3>通信设置</h3>
+      <div class="row"><label>端口号</label><select id="port" style="width:118px"></select></div>
+      <div class="row"><label>波特率</label><select id="baud">
+        <option>1000000</option><option>115200</option><option>57600</option><option>38400</option><option>19200</option><option>9600</option>
+      </select></div>
+      <div class="row"><label>超时</label><input id="timeout" type="number" value="25" style="width:60px"></div>
+      <div class="row"><label></label><button id="btnOpen">打开</button></div>
+    </div>
+    <div class="panel" style="flex:1"><h3>舵机搜索</h3>
+      <div class="row"><button id="btnScan">搜索</button><span id="scanInfo"></span></div>
+      <table id="servoList"><thead><tr><th>ID号</th><th>型号</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <!-- 中栏 -->
+  <div class="col" style="flex:1; min-width:420px">
+    <div id="chartWrap"><canvas id="chart" height="300"></canvas></div>
+    <div class="panel"><h3>舵机操作</h3>
+      <div class="row">
+        <label style="width:auto"><input type="radio" name="wmode" id="wmNormal" checked>普通写</label>
+        <label style="width:auto"><input type="radio" name="wmode" id="wmSync">同步写</label>
+      </div>
+      <div class="row"><input type="range" id="goalSlider" min="0" max="4095" value="2048" style="flex:1"></div>
+      <div class="row">
+        <label>加速度</label><input id="inAcc" type="number" value="50" style="width:56px">
+        <label>目标</label><input id="inGoal" type="number" value="2048" style="width:64px">
+        <button id="btnAsync">异步执行</button>
+      </div>
+      <div class="row">
+        <label>速度</label><input id="inSpeed" type="number" value="1000" style="width:64px">
+        <label>时间</label><input id="inTime" type="number" value="0" style="width:56px">
+        <button id="btnSet">设置</button>
+        <button id="btnTorque">扭矩:开</button>
+      </div>
+    </div>
+    <div class="panel"><h3>自动调试</h3>
+      <div class="row">
+        <label>起启</label><input id="autoFrom" type="number" value="0" style="width:64px">
+        <label style="width:70px">延时(扫描)</label><input id="autoDelay" type="number" value="2500" style="width:64px">
+        <button id="btnAutoScan">扫描</button>
+      </div>
+      <div class="row">
+        <label>结束</label><input id="autoTo" type="number" value="1023" style="width:64px">
+        <label style="width:70px">步数:延时</label><input id="autoSteps" type="number" value="4" style="width:44px"><input id="autoStepDelay" type="number" value="20" style="width:44px">
+        <button id="btnAutoStep">步进</button>
+        <button id="btnAutoStop">停止</button>
+      </div>
+    </div>
+  </div>
+  <!-- 右栏 -->
+  <div class="col" style="width:230px">
+    <div class="panel legend"><h3>曲线</h3>
+      <label><input type="checkbox" data-k="pos" checked><span class="sw" style="background:#000"></span>位置(黑)</label>
+      <label><input type="checkbox" data-k="load" checked><span class="sw" style="background:#e00"></span>扭力(红)</label>
+      <label><input type="checkbox" data-k="speed" checked><span class="sw" style="background:#0a0"></span>速度(绿)</label>
+      <label><input type="checkbox" data-k="current"><span class="sw" style="background:#0cc"></span>电流(青)</label>
+      <label><input type="checkbox" data-k="temp"><span class="sw" style="background:#c0c"></span>温度(米)</label>
+      <label><input type="checkbox" data-k="volt"><span class="sw" style="background:#70f"></span>电压(紫×100)</label>
+      <div class="row"><label style="width:60px">水平位移</label><input type="range" id="hShift" min="0" max="0" value="0"></div>
+      <div class="row"><label style="width:60px">水平缩放</label><input type="range" id="hZoom" min="100" max="3000" value="600"></div>
+      <div class="row"><label style="width:60px">上限</label><input id="upper" type="number" value="0" style="width:64px"></div>
+      <div class="row"><label style="width:60px">下限</label><input id="lower" type="number" value="0" style="width:64px"></div>
+    </div>
+    <div class="panel"><h3>舵机反馈</h3>
+      <div class="fb"><div>
+        <div><span class="k">电压：</span><span class="v" id="fVolt">-</span> V</div>
+        <div><span class="k">电流：</span><span class="v" id="fCur">-</span></div>
+        <div><span class="k">温度：</span><span class="v" id="fTemp">-</span></div>
+        <div><span class="k">移动：</span><span class="v" id="fMov">-</span></div>
+        <div><span class="k">状态：</span><span class="v" id="fStat">-</span></div>
+      </div><div>
+        <div><span class="k">扭矩：</span><span class="v" id="fTorque">-</span></div>
+        <div><span class="k">速度：</span><span class="v" id="fSpd">-</span></div>
+        <div><span class="k">位置：</span><span class="v" id="fPos">-</span></div>
+        <div><span class="k">目标：</span><span class="v" id="fGoal">-</span></div>
+      </div></div>
+    </div>
+    <div class="panel"><h3>数据分析</h3>
+      <div class="row"><label style="width:60px">时间(秒)</label><input id="recSecs" type="number" value="30" style="width:64px"><button id="btnRec">导出</button></div>
+      <div class="row"><label style="width:60px">文件:行数</label><span>record.txt</span>&nbsp;<span id="recRows">0</span><button id="btnClear">清空</button></div>
+    </div>
+  </div>
+</div>
+<div id="status">未连接</div>
+<script>
+const $ = id => document.getElementById(id);
+let ws = null, selectedId = null, torqueOn = 1, recording = false;
+const buf = [], MAXBUF = 5000;
+const SERIES = [
+  { k: "pos",     axis: "L", c: "#000" },
+  { k: "load",    axis: "R", c: "#e00" },
+  { k: "speed",   axis: "R", c: "#0a0" },
+  { k: "current", axis: "R", c: "#0cc" },
+  { k: "temp",    axis: "R", c: "#c0c" },
+  { k: "volt",    axis: "R", c: "#70f" },   // volt×100 画在右轴
+];
+
+// ---- 通信 ----
+function setStatus(t) { $("status").textContent = t; }
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+function connect() {
+  ws = new WebSocket("ws://" + location.host + "/ws");
+  ws.onopen = () => setStatus("已连接服务器");
+  ws.onclose = () => { setStatus("连接断开，3 秒后重连…"); setTimeout(connect, 3000); };
+  ws.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "hello") {
+      fillPorts(m.ports);
+      setStatus(m.open ? "串口已打开" : "串口未打开 — 左边选一个点「打开」");
+      if (m.found) fillServos(m.found.map(id => ({ id, model: "" })));
+      if (m.selected != null) {          // 服务器端已选中的（比如别的客户端选的），直接跟过来
+        selectedId = m.selected;
+        document.querySelectorAll("#servoList tbody tr").forEach(tr => {
+          if (Number(tr.firstChild.textContent) === m.selected) tr.className = "sel";
+        });
+        setStatus("已选中舵机 ID " + m.selected);
+      }
+    } else if (m.type === "state") {
+      onState(m);
+    } else if (m.type === "selected") {
+      selectedId = m.id; torqueOn = m.torque; updTorqueBtn();
+      setStatus("已选中舵机 ID " + m.id);
+    } else if (m.type === "record") {
+      recording = m.active;
+      $("btnRec").textContent = recording ? "停止" : "导出";
+      if (!recording) $("recRows").textContent = m.rows;
+    } else if (m.type === "error") {
+      setStatus("错误：" + m.msg);
+    }
+  };
+}
+
+function fillPorts(ports) {
+  const sel = $("port"), cur = sel.value;
+  sel.innerHTML = ports.map(p => `<option value="${p.device}">${p.device.replace("/dev/", "")}</option>`).join("");
+  if (cur) sel.value = cur;
+  const um = ports.find(p => p.device.includes("usbmodem"));
+  if (!cur && um) sel.value = um.device;
+}
+
+function fillServos(servos) {
+  const tb = document.querySelector("#servoList tbody");
+  tb.innerHTML = "";
+  for (const s of servos) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${s.id}</td><td>${s.model}</td>`;
+    if (s.id === selectedId) tr.className = "sel";
+    tr.onclick = () => {
+      document.querySelectorAll("#servoList tr").forEach(r => r.className = "");
+      tr.className = "sel";
+      send({ op: "select", id: s.id });
+    };
+    tb.appendChild(tr);
+  }
+  $("scanInfo").textContent = servos.length + " 颗";
+}
+
+function onState(m) {
+  if (m.error) {
+    $("fStat").textContent = "通信超时";
+    return;
+  }
+  if (selectedId === null) selectedId = m.id;   // 本地没选中就跟着服务器选中的走
+  if (m.id !== selectedId) return;
+  $("fVolt").textContent = m.volt.toFixed(1);
+  $("fCur").textContent = Math.round(m.current_ma);
+  $("fTemp").textContent = m.temp;
+  $("fMov").textContent = m.moving;
+  $("fStat").textContent = m.status_text || "正常";
+  $("fTorque").textContent = m.torque;
+  $("fSpd").textContent = m.speed;
+  $("fPos").textContent = m.pos;
+  $("fGoal").textContent = m.goal;
+  if (recording) $("recRows").textContent = Number($("recRows").textContent) + 1;
+  buf.push({ t: m.t, pos: m.pos, load: m.load, speed: m.speed, current: m.current_ma, temp: m.temp, volt: m.volt * 100 });
+  if (buf.length > MAXBUF) buf.shift();
+  draw();
+}
+
+// ---- 曲线 ----
+function draw() {
+  const cv = $("chart"), W = cv.width = cv.clientWidth, H = cv.height = 300;
+  const ctx = cv.getContext("2d");
+  const padL = 34, padR = 40, padT = 6, padB = 4;
+  const w = W - padL - padR, h = H - padT - padB;
+  ctx.clearRect(0, 0, W, H);
+  // 网格：左轴 0-4096 每 400；右轴 -1000..1000 每 200
+  ctx.strokeStyle = "#bbb"; ctx.fillStyle = "#000"; ctx.font = "10px sans-serif"; ctx.setLineDash([3, 3]);
+  for (let v = 0; v <= 4000; v += 400) {
+    const y = padT + h - v / 4096 * h;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + w, y); ctx.stroke();
+    ctx.fillText(v, 2, y + 3);
+  }
+  // 右轴标签（-1000..1000）
+  ctx.fillStyle = "#555";
+  for (let v = -1000; v <= 1000; v += 200) {
+    const y = padT + h / 2 - v / 1000 * (h / 2);
+    ctx.fillText(v, padL + w + 4, y + 3);
+  }
+  for (let i = 0; i <= 10; i++) {
+    const x = padL + i / 10 * w;
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + h); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // 上限/下限参考线
+  for (const [id, c] of [["upper", "#f80"], ["lower", "#f80"]]) {
+    const v = Number($(id).value);
+    if (v > 0) {
+      const y = padT + h - v / 4096 * h;
+      ctx.strokeStyle = c; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + w, y); ctx.stroke();
+    }
+  }
+  // 数据
+  const view = Math.min(Number($("hZoom").value), buf.length);
+  if (view < 2) return;
+  const maxShift = Math.max(0, buf.length - view);
+  const hs = $("hShift");
+  hs.max = maxShift;
+  if (Number(hs.value) > maxShift) hs.value = maxShift;
+  // 水平位移：0 = 跟最新，往右拖回看历史
+  const start = Math.max(0, maxShift - Number(hs.value));
+  const slice = buf.slice(start, start + view);
+  for (const s of SERIES) {
+    if (!document.querySelector(`input[data-k=${s.k}]`).checked) continue;
+    ctx.strokeStyle = s.c; ctx.beginPath();
+    slice.forEach((d, i) => {
+      const x = padL + i / (view - 1) * w;
+      let v = d[s.k];
+      const y = s.axis === "L" ? padT + h - v / 4096 * h : padT + h / 2 - Math.max(-1000, Math.min(1000, v)) / 1000 * (h / 2);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  }
+}
+window.addEventListener("resize", draw);
+$("hShift").oninput = draw; $("hZoom").oninput = draw;
+$("upper").oninput = draw; $("lower").oninput = draw;
+document.querySelectorAll(".legend input[type=checkbox]").forEach(c => c.onchange = draw);
+
+// ---- 控件 ----
+$("btnOpen").onclick = async () => {
+  const open = $("btnOpen").textContent === "打开";
+  const url = open
+    ? `/api/open?port=${encodeURIComponent($("port").value)}&baud=${$("baud").value}&timeout=${$("timeout").value}`
+    : "/api/close";
+  const r = await (await fetch(url, { method: "POST" })).json();
+  if (r.ok) {
+    $("btnOpen").textContent = open ? "关闭" : "打开";
+    setStatus(open ? `串口 ${$("port").value} @ ${$("baud").value} 已打开` : "串口已关闭");
+  } else setStatus("打开失败：" + (r.error || ""));
+};
+$("btnScan").onclick = async () => {
+  $("scanInfo").textContent = "扫描中…";
+  const r = await (await fetch("/api/scan", { method: "POST" })).json();
+  if (r.error) { $("scanInfo").textContent = r.error; return; }
+  fillServos(r.servos);
+  if (r.servos.length === 1) {           // 只搜到一颗就直接选中，不用再点
+    document.querySelector("#servoList tbody tr").className = "sel";
+    send({ op: "select", id: r.servos[0].id });
+  }
+};
+$("goalSlider").oninput = () => { $("inGoal").value = $("goalSlider").value; send({ op: "goal", goal: Number($("goalSlider").value) }); };
+$("inGoal").onchange = () => { $("goalSlider").value = $("inGoal").value; };
+$("btnSet").onclick = () => send({
+  op: "set", sync: $("wmSync").checked ? 1 : null,
+  goal: Number($("inGoal").value), acc: Number($("inAcc").value),
+  speed: Number($("inSpeed").value), time: Number($("inTime").value),
+});
+$("btnAsync").onclick = () => {
+  send({ op: "reg_write", goal: Number($("inGoal").value), acc: Number($("inAcc").value),
+         speed: Number($("inSpeed").value), time: Number($("inTime").value) });
+  setTimeout(() => send({ op: "action" }), 30);
+};
+function updTorqueBtn() { $("btnTorque").textContent = "扭矩:" + (torqueOn ? "开" : "关"); }
+$("btnTorque").onclick = () => { torqueOn = torqueOn ? 0 : 1; updTorqueBtn(); send({ op: "torque", on: torqueOn }); };
+$("btnAutoScan").onclick = () => send({ op: "auto_scan", from: Number($("autoFrom").value), to: Number($("autoTo").value), delay: Number($("autoDelay").value) });
+$("btnAutoStep").onclick = () => send({ op: "auto_step", from: Number($("autoFrom").value), to: Number($("autoTo").value), steps: Number($("autoSteps").value), delay: Number($("autoStepDelay").value) });
+$("btnAutoStop").onclick = () => send({ op: "auto_stop" });
+$("btnRec").onclick = () => recording ? send({ op: "record_stop" }) : send({ op: "record", seconds: Number($("recSecs").value) });
+$("btnClear").onclick = () => { buf.length = 0; $("recRows").textContent = 0; draw(); };
+
+connect();
+</script>
+</body>
+</html>

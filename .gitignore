@@ -3,5 +3,14 @@ docs/bench/*.npz
 docs/bench/*.json
 .DS_Store
 
+# 本机工作约定（含代理等本地配置），不上传 GitHub
+AGENTS.md
+
 # 三个上游参考 checkout（本地副本，不纳入版本管理）
 reference/
+
+# 桌面随手拍的草稿照片（成品标注图在 working-docs/board-photos/）
+tmp-photo/
+photo-viewpoint/
+
+__pycache__/

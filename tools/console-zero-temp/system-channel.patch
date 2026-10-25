@@ -1,0 +1,199 @@
+--- a/raw_telemetry.py
++++ b/raw_telemetry.py
+@@ -12,12 +12,14 @@
+ import secrets
+ import socket
+ import struct
++import subprocess
+ import threading
+ import time
+ 
+ from telemetry import TTL
+ from startup_gate import receive as startup_receive, ready as startup_ready, StartupFailure
+-from ssh_connect import SSHConnectError, failure_message
++from ssh_connect import SSHConnectError, failure_message, ssh_command, ssh_process_options
++from process_lifecycle import spawn_process, retire_process
+ 
+ MAX_FRAME = 8 * 1024 * 1024
+ PROTOCOL = 'r17-telemetry'
+@@ -207,8 +209,161 @@
+     label = 'robotd' if endpoint == 'robotd' else '测距服务'
+     return {'error': label + ' 数据连接失败；原始错误：' + detail,
+             'error_source': endpoint}
++
++
++# --- Zero system channel -----------------------------------------------------
++# Local addition: in R17 V167 the `system` channel had no producer at all.
++# agent.py's system_loop is the only code that ever filled it, and the only
++# function that injected agent.py (console.py's ssh_loop) has no caller, so the
++# ZERO 温度 tile could never leave its waiting state in `service` mode — the
++# mode start.command/start.cmd actually launch. This reads the same board files
++# agent.py read, from one long-lived SSH session running a fixed read-only
++# shell loop. A new session is opened only after a failure, so no reconnect
++# churn is added to a board whose sshd already sheds sessions under load.
++SYSTEM_PERIOD = 3
++SYSTEM_SCRIPT = """
++while :; do
++  printf 'hostname=%s\\n' "$(hostname 2>/dev/null)"
++  printf 'boot_id=%s\\n' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
++  printf 'uptime_s=%s\\n' "$(cut -d' ' -f1 /proc/uptime 2>/dev/null)"
++  awk '/^MemTotal:/{print "memory_total=" $2*1024} /^MemAvailable:/{print "memory_available=" $2*1024}' /proc/meminfo 2>/dev/null
++  printf 'cpu_stat=%s\\n' "$(head -n1 /proc/stat 2>/dev/null)"
++  printf 'cpu_temp_milli=%s\\n' "$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -n1)"
++  printf 'robotd_identity=%s\\n' "$(base64 /run/robotd/identity.json 2>/dev/null | tr -d '\\n')"
++  printf 'END\\n'
++  sleep @PERIOD@
++done
++""".replace('@PERIOD@', str(SYSTEM_PERIOD))
++
++
++def system_number(value):
++    try:
++        number = float(value)
++    except (TypeError, ValueError):
++        return None
++    return number if math.isfinite(number) else None
++
++
++def cpu_counters(text):
++    """(total_jiffies, idle_jiffies) from /proc/stat's first line, or None."""
++    parts = (text or '').split()
++    if not parts or parts[0] != 'cpu':
++        return None
++    try:
++        values = [int(value) for value in parts[1:9]]
++    except ValueError:
++        return None
++    if len(values) < 5:
++        return None
++    return (sum(values), values[3] + values[4])
++
++
++def system_sample(block, previous_cpu=None):
++    """One key=value block from SYSTEM_SCRIPT -> (payload, cpu counters)."""
++    fields = {}
++    for line in block.splitlines():
++        key, sep, value = line.partition('=')
++        key = key.strip()
++        if sep and key and key not in fields:
++            fields[key] = value.strip()
++    data = {'identities': {}}
++    for key in ('hostname', 'boot_id'):
++        if fields.get(key):
++            data[key] = fields[key]
++    uptime = system_number(fields.get('uptime_s'))
++    if uptime is not None:
++        data['uptime_s'] = uptime
++    for key in ('memory_total', 'memory_available'):
++        number = system_number(fields.get(key))
++        if number is not None:
++            data[key] = int(number)
++    milli = system_number(fields.get('cpu_temp_milli'))
++    if milli is not None:
++        # sysfs reports millidegrees; a zone that already reports degrees is kept.
++        data['cpu_temp_c'] = milli/1000 if milli >= 1000 else milli
++    counters = cpu_counters(fields.get('cpu_stat'))
++    if counters is not None and previous_cpu is not None:
++        total, idle = counters[0] - previous_cpu[0], counters[1] - previous_cpu[1]
++        if total > 0:
++            data['cpu_percent'] = max(0.0, min(100.0, 100*(1 - idle/total)))
++    encoded = fields.get('robotd_identity')
++    if encoded:
++        try:
++            identity = json.loads(base64.b64decode(encoded, validate=True))
++            if isinstance(identity, dict):
++                data['identities']['robotd'] = identity
++        except (ValueError, TypeError):
++            pass
++    if not data['identities']:
++        del data['identities']
++    return data, counters
+ 
+ 
++def system_loop(target, emit, stop, system_log=None, connection_pause=None, hub=None, generation=None):
++    failures = 0
++    previous_cpu = None
++    while not stop.is_set():
++        if connection_pause is not None and connection_pause.is_set():
++            stop.wait(.2)
++            continue
++        proc, errors = None, []
++        try:
++            proc = spawn_process([*ssh_command(target), SYSTEM_SCRIPT], **ssh_process_options(target),
++                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
++                                 stderr=subprocess.PIPE, bufsize=-1)
++            def stderr_reader(child=proc, messages=errors):
++                # Diagnostics only; the blocking readline loop owns the data path.
++                try:
++                    for raw in iter(child.stderr.readline, b''):
++                        line = raw.decode('utf-8', 'replace').strip()
++                        if line and not line.startswith('debug'):
++                            messages.append(line[:300]); del messages[:-4]
++                except (OSError, ValueError):
++                    pass
++                finally:
++                    child.stderr.close()
++            threading.Thread(target=stderr_reader, daemon=True).start()
++            block = []
++            while not stop.is_set() and not (connection_pause and connection_pause.is_set()):
++                raw = proc.stdout.readline()
++                if not raw:
++                    raise EOFError('Zero 系统信息连接已关闭')
++                line = raw.decode('utf-8', 'replace').rstrip('\n')
++                if line != 'END':
++                    block.append(line)
++                    if len(block) > 64:
++                        raise ValueError('Zero 系统信息块过长')
++                    continue
++                data, previous_cpu = system_sample('\n'.join(block), previous_cpu)
++                block, failures = [], 0
++                event = {'channel': 'system', 'data': data}
++                emit(event)
++                if hub is not None and generation is not None:
++                    hub.event(event, generation)
++        except (OSError, EOFError, ValueError, SSHConnectError) as exc:
++            if not stop.is_set() and not (connection_pause is not None and connection_pause.is_set()):
++                detail = ' / '.join(errors[-2:]) or str(exc)
++                event = {'channel': 'system', 'error_source': 'zero',
++                         'error': 'Zero 系统信息连接失败；原始错误：' + detail}
++                emit(event)
++                if hub is not None and generation is not None:
++                    hub.event(event, generation)
++                if system_log:
++                    system_log.add('Zero 系统信息', detail)
++        finally:
++            if proc is not None:
++                try:
++                    retire_process(proc, grace=1)
++                except Exception:
++                    pass
++        if stop.is_set():
++            break
++        failures += 1
++        # sshd sheds new sessions once unauthenticated ones pile up on this
++        # board, so back off rather than retrying on every cycle.
++        stop.wait(min(2*failures, 6))
++
++
+ def raw_loop(target, config, emit, stop, system_log=None, connection_pause=None):
+     from socket_transport import open_remote_socket
+     hub = config['hub']
+@@ -277,6 +432,10 @@
+             stop.wait(2)
+     worker = threading.Thread(target=tof_loop, daemon=True)
+     worker.start()
++    # Local addition: the shipped build never filled the `system` channel.
++    system_worker = threading.Thread(target=system_loop, daemon=True,
++        args=(target, emit, stop, system_log, connection_pause, hub, generation))
++    system_worker.start()
+     try:
+         while not stop.is_set():
+             if handoff and not handoff.wait(stop):break
+@@ -348,6 +507,7 @@
+             if not (handoff and handoff.paused):stop.wait(2)
+     finally:
+         worker.join(timeout=1)
++        system_worker.join(timeout=1)
+ 
+ 
+ def send_frame(writer, opcode, payload):

@@ -55,6 +55,12 @@
       <div class="row"><label>超时</label><input id="timeout" type="number" value="25" style="width:60px"></div>
       <div class="row"><label></label><button id="btnOpen">打开</button></div>
     </div>
+    <div class="panel"><h3>设置 ID</h3>
+      <div class="row"><label>旧 ID</label><input id="oldId" type="number" value="1" min="1" max="253" style="width:60px"></div>
+      <div class="row"><label>新 ID</label><input id="newId" type="number" value="10" min="1" max="253" style="width:60px"></div>
+      <div class="row"><label></label><button id="btnSetId">设 ID</button></div>
+      <div class="row" style="display:block"><span id="setIdMsg" class="warn" style="white-space:normal;line-height:1.35">一次只接一颗；机器人 10-14/20-24/30-34</span></div>
+    </div>
     <div class="panel" style="flex:1"><h3>舵机搜索</h3>
       <div class="row"><button id="btnScan">搜索</button><span id="scanInfo"></span></div>
       <table id="servoList"><thead><tr><th>ID号</th><th>型号</th></tr></thead><tbody></tbody></table>
@@ -173,8 +179,21 @@ function connect() {
       recording = m.active;
       $("btnRec").textContent = recording ? "停止" : "导出";
       if (!recording) $("recRows").textContent = m.rows;
+    } else if (m.type === "set_id") {
+      if (m.ok) {
+        selectedId = m.new;
+        let msg = `成功：ID ${m.old} → ${m.new}`;
+        if (m.baud === 0) msg += "；波特率 1 Mbps";
+        else if (m.baud != null) msg += `；警告：波特率码 ${m.baud}（不是 1 Mbps）`;
+        $("setIdMsg").textContent = msg + "。拔掉这颗，换下一颗 ID 1。";
+        $("oldId").value = 1;
+        $("btnScan").click();
+      } else {
+        $("setIdMsg").textContent = m.msg || "写 ID 失败";
+      }
     } else if (m.type === "error") {
       setStatus("错误：" + m.msg);
+      $("setIdMsg").textContent = m.msg;
     }
   };
 }
@@ -307,6 +326,20 @@ $("btnScan").onclick = async () => {
     document.querySelector("#servoList tbody tr").className = "sel";
     send({ op: "select", id: r.servos[0].id });
   }
+};
+$("btnSetId").onclick = () => {
+  const oldId = Number($("oldId").value), newId = Number($("newId").value);
+  if (!Number.isInteger(oldId) || !Number.isInteger(newId) ||
+      oldId < 1 || oldId > 253 || newId < 1 || newId > 253) {
+    $("setIdMsg").textContent = "旧/新 ID 必须是 1..253"; return;
+  }
+  if (oldId === newId) { $("setIdMsg").textContent = "旧 ID 和新 ID 不能相同"; return; }
+  if (!ws || ws.readyState !== 1) { $("setIdMsg").textContent = "WebSocket 未连接"; return; }
+  const robot = (newId >= 10 && newId <= 14) || (newId >= 20 && newId <= 24) || (newId >= 30 && newId <= 34);
+  if (!robot && !confirm(`ID ${newId} 不在机器人映射（10-14/20-24/30-34）。确定要写？`)) return;
+  if (!confirm(`把 ID ${oldId} 改成 ${newId}？\n总线上只能有这一颗 ID ${oldId} 的舵机！`)) return;
+  $("setIdMsg").textContent = `正在把 ID ${oldId} 改成 ${newId}…`;
+  send({ op: "set_id", old: oldId, new: newId });
 };
 $("goalSlider").oninput = () => { $("inGoal").value = $("goalSlider").value; send({ op: "goal", goal: Number($("goalSlider").value) }); };
 $("inGoal").onchange = () => { $("goalSlider").value = $("inGoal").value; };

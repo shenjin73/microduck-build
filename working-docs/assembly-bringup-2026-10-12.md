@@ -44,14 +44,15 @@ HAT J5（Qwiic，唯一真 I2C）──► VL53L8CX ToF
 - ✅ GND 蜂通：HAT 舵机口 GND 针 ↔ Radxa USB-C 外壳
 - ✅ +BATT↔GND 无短路：12–20 MΩ（阻值缓慢漂移是电容+非线性负载的正常表现；
   判据是绝对值，个位数欧姆才是短路）
-- ⬜ DATA 线蜂通（转接线交叉验证）：imu 板 CN2 最下针 ↔ HAT 舵机口 pin 3
+- ✅ DATA 线蜂通（转接线交叉验证）：imu 板 CN2 最下针 ↔ HAT 舵机口 pin 3
+
+**不通电三项检测全部通过（2026-10-13），可以上电。**
 
 ## 3. 接下来（按顺序）
 
 **阶段 A（USB 供电，不接电池）— 软件准备**
 
-1. `ssh-copy-id` + 跑 `provision-board.sh`（需 DUCK_TOKEN；中途断线=预期）
-2. 验收四件套：`ls /dev/ttyS2`、`dmesg|grep rknpu`、`gst-inspect-1.0 mpph264enc`、
+1. `ssh-copy-id` + 跑 `provision-board.sh`（需 DUCK_TOKEN；中途断线=预期）2. 验收四件套：`ls /dev/ttyS2`、`dmesg|grep rknpu`、`gst-inspect-1.0 mpph264enc`、
    `robotctl health`（无舵机时报不健康是诚实答案）
 3. `systemctl mask serial-getty@ttyS2`（Armbian 默认控制台会往总线吐垃圾）；
    U-Boot 控制台按 Radxa 文档处理（/etc/default/u-boot prompt/timeout=0）

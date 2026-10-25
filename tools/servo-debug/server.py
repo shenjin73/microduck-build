@@ -211,7 +211,7 @@ def api_scan(request):
         return JSONResponse({"error": "串口没打开"}, status_code=400)
     global FOUND
     servos = []
-    for sid in range(0, 21):
+    for sid in range(1, 41):
         if BUS.ping(sid) is not None:
             try:
                 fw = f"{BUS.read_u8(sid, 0)}.{BUS.read_u8(sid, 1)}"
@@ -225,7 +225,7 @@ def api_scan(request):
 # ---- WebSocket ----
 def handle(cmd):
     """WS 指令，同步执行（starlette 把 sync 路由跑在线程池，这里直接被 WS 协程调，操作都是毫秒级）。"""
-    global SELECTED
+    global SELECTED, FOUND
     op = cmd.get("op")
     if not BUS and op not in ("ports",):
         return {"type": "error", "msg": "串口没打开"}
@@ -273,6 +273,39 @@ def handle(cmd):
     if op == "action":
         action(SELECTED)
         return {"type": "ok", "what": "ACTION 已发"}
+    if op == "set_id":
+        # 一次只改一颗：先 ping 旧 ID，再解锁 EEPROM -> 写 ID -> 上锁 -> 验证新 ID。
+        old, new = int(cmd.get("old", 1)), int(cmd["new"])
+        if not (1 <= old <= 253 and 1 <= new <= 253):
+            return {"type": "set_id", "ok": False, "msg": "旧/新 ID 必须在 1..253"}
+        if old == new:
+            return {"type": "set_id", "ok": False, "msg": "旧 ID 和新 ID 不能相同"}
+        if BUS.ping(old) is None:
+            return {"type": "set_id", "ok": False,
+                    "msg": f"ID {old} 没应答：确认只接这一颗、供电正常、波特率 1 Mbps"}
+        try:
+            BUS.set_id(old, new)
+        except Exception as e:
+            return {"type": "set_id", "ok": False,
+                    "msg": f"写 ID 失败：{type(e).__name__}: {e}"}
+        err = BUS.ping(new)
+        if err is None:
+            old_err = BUS.ping(old)
+            return {"type": "set_id", "ok": False,
+                    "msg": f"新 ID {new} 没应答；旧 ID {old} "
+                           f"{'仍在' if old_err is not None else '也不在了'}"}
+        try:
+            baud = BUS.read_u8(new, 6)
+        except Exception:
+            baud = None
+        try:
+            model = BUS.read_u16(new, 3)
+        except Exception:
+            model = None
+        FOUND = sorted((set(FOUND) - {old}) | {new})
+        SELECTED = new
+        return {"type": "set_id", "ok": True, "old": old, "new": new,
+                "baud": baud, "model": model}
     if op == "auto_scan":
         start_auto(int(cmd["from"]), int(cmd["to"]), 1, int(cmd["delay"]))
         return {"type": "auto", "active": True}

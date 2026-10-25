@@ -6,8 +6,17 @@ docs/bench/*.json
 # 本机工作约定（含代理等本地配置），不上传 GitHub
 AGENTS.md
 
+# 本机敏感信息（密码、token、私钥等）——只存在于本机，绝不入库
+local/
+
 # 三个上游参考 checkout（本地副本，不纳入版本管理）
 reference/
+
+# 大体积下载物（系统镜像 .img.xz 等，GitHub 也拒绝 >100MB 单文件）
+downloads/
+
+# 微信下载的模型/视频等（约 74MB，不入库）
+download_from_wx/
 
 # 桌面随手拍的草稿照片（成品标注图在 working-docs/board-photos/）
 tmp-photo/

@@ -1,0 +1,2247 @@
+"""Behavior library: envs build and step cleanly, recipes obey the sign rules,
+the chat matcher finds the right trick."""
+
+import numpy as np
+import pytest
+
+from microduck_local.behaviors import (
+    _RUN_STAGE_SCALE,  # noqa: F401
+    BEHAVIORS,
+    BehaviorEnv,
+    behavior_card,
+    for_robot,
+    match_behavior,
+)
+
+
+@pytest.mark.parametrize("behavior_id", sorted(BEHAVIORS))
+def test_behavior_env_steps_clean(behavior_id):
+    env = BehaviorEnv(behavior_id, obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == (61,)
+    # Command slots: a TRICK pins them to zero, while a locomotion behavior
+    # legitimately carries its commanded forward speed there (that command is
+    # the whole difference between imitating a gait and being asked to run).
+    cmd = BEHAVIORS[behavior_id].forward_cmd
+    if behavior_id == "spin":
+        # Spin carries a per-episode DIRECTION command in the wz slot — the
+        # signed spin_fast pay needs it, and it makes the trick steerable.
+        # vx/vy stay zero like any trick.
+        np.testing.assert_allclose(obs[48:50], np.zeros(2, np.float32), atol=1e-6)
+        assert abs(float(obs[50])) == pytest.approx(1.0)
+    elif cmd:
+        # GPU run mix: standing (vx=vy=wz=0), 55% forward (vy=wz=0, vx>=0.3),
+        # remainder omni (vy in ±0.3, wz in ±1). Ceiling starts at 0.4.
+        assert abs(float(obs[48])) <= cmd + 1e-6
+        assert abs(float(obs[49])) <= 0.3 + 1e-6
+        assert abs(float(obs[50])) <= 1.0 + 1e-6
+    else:
+        np.testing.assert_allclose(obs[48:51], np.zeros(3, np.float32), atol=1e-6)
+    rng = np.random.default_rng(0)
+    for _ in range(100):
+        obs, reward, terminated, truncated, _ = env.step(
+            rng.uniform(-0.3, 0.3, 14).astype(np.float32))
+        assert np.isfinite(obs).all() and np.isfinite(reward)
+        if terminated or truncated:
+            env.reset(seed=1)
+
+
+@pytest.mark.parametrize("behavior_id", sorted(BEHAVIORS))
+def test_penalty_terms_stay_negative(behavior_id):
+    env = BehaviorEnv(behavior_id, obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    rng = np.random.default_rng(2)
+    for _ in range(50):
+        _, _, terminated, truncated, _ = env.step(
+            rng.uniform(-0.5, 0.5, 14).astype(np.float32))
+        if terminated or truncated:
+            env.reset(seed=3)
+    for name, total in env.reward_sums.items():
+        if name.endswith("_penalty"):
+            assert total <= 1e-9, f"{name} accumulated {total:+.4f} (> 0)"
+
+
+def test_positive_terms_are_bounded_per_step():
+    """No jackpots: every non-penalty term pays at most its weight per step."""
+    env = BehaviorEnv("one_leg", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    for _ in range(30):
+        _, _, terminated, truncated, _ = env.step(np.zeros(14, np.float32))
+        if terminated or truncated:
+            env.reset(seed=0)
+    weights = {t.key: t.weight for t in BEHAVIORS["one_leg"].terms if not t.is_penalty}
+    steps = 30
+    for key, w in weights.items():
+        assert env.reward_sums.get(key, 0.0) <= w * steps + 1e-6
+
+
+def test_matcher():
+    assert match_behavior("please stand on 1 leg").id == "one_leg"
+    assert match_behavior("can you balance on one foot?").id == "one_leg"
+    assert match_behavior("crouch down").id == "crouch"
+    assert match_behavior("do a spin!").id == "spin"
+    assert match_behavior("do a back flip").id == "backflip"
+    # "stand still" must not be stolen by — or steal from — one_leg.
+    assert match_behavior("stand still").id == "stand"
+    assert match_behavior("just stand there and hold still").id == "stand"
+    assert match_behavior("stand on one leg").id == "one_leg"
+    assert match_behavior("balance on one foot").id == "one_leg"
+    assert match_behavior("hop forward on one leg").id == "one_leg_hop"
+    assert match_behavior("左腿跳").id == "one_leg_hop"
+    assert match_behavior("两脚交替跳").id == "alternate_hop"
+    assert match_behavior("双脚一起跳").id == "bunny_hop"
+    assert match_behavior("flip backwards for me").id == "backflip"
+    # The raw jumping flip must not be confused with the staged floor roll.
+    assert match_behavior("do a jump backflip").id == "airflip"
+    assert match_behavior("flip in the air").id == "airflip"
+    assert match_behavior("do a back flip").id == "backflip"
+    assert match_behavior("wave hello") is None
+
+
+def test_matcher_takes_a_bare_behavior_id():
+    """The teach panel resubmits a run's recipe by id. Ids are stable; card
+    titles are display text, and an imitation card's title is the clip's
+    name dressed up (`Perform “backflip”`) — scored as prose, that used to
+    land on the floor-roll recipe, so a retrain trained the wrong trick."""
+    # Scoped to the duck: the registry also holds another body's tasks, and
+    # the matcher is robot-filtered so a duck roster can never be handed one.
+    for b in for_robot("microduck"):
+        assert match_behavior(b.id) is b
+        assert match_behavior(f"  {b.id.upper()} ") is b
+    assert match_behavior("imitate").id == "imitate"
+    # Only the exact id short-circuits; prose still scores as prose.
+    assert match_behavior("spin please").id == "spin"
+
+
+def test_cards_are_json_friendly():
+    import json
+    for b in BEHAVIORS.values():        # every body's cards must serialize
+        card = behavior_card(b)
+        json.dumps(card)
+        assert card["terms"] and card["howItLearns"] and card["emoji"]
+
+
+def _backflip_env():
+    env = BehaviorEnv("backflip", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    return env
+
+
+def test_backflip_rotation_integrates_backward_only():
+    """The state hook credits BACKWARD pitch (negative gyro_y) and clips:
+    forward rotation can't bank negative progress."""
+    import mujoco
+    env = _backflip_env()
+    env._bf_rot = 0.0
+    env.data.qvel[:] = 0.0
+    env.data.qvel[4] = -3.0  # backward spin (verified sign convention)
+    mujoco.mj_forward(env.model, env.data)
+    BEHAVIORS["backflip"].state_fn(env)
+    assert env._bf_rot > 0.03
+    env._bf_rot = 0.0
+    env.data.qvel[4] = +3.0  # forward spin banks nothing
+    mujoco.mj_forward(env.model, env.data)
+    BEHAVIORS["backflip"].state_fn(env)
+    assert env._bf_rot == 0.0
+
+
+def test_backflip_landed_hold_needs_a_completed_flip():
+    """No free money at spawn: the upright start pays landed_hold only once
+    the full rotation has actually been credited."""
+    from microduck_local.behaviors import _bf_landed_hold
+    env = _backflip_env()
+    for seed in range(20):  # find an ordinary UPRIGHT spawn (families are random)
+        env.reset(seed=seed)
+        if env._bf_rot == 0.0:
+            break
+    else:
+        pytest.fail("no upright spawn in 20 seeds")
+    for _ in range(10):  # settle the drop-in until both feet touch
+        env.step(np.zeros(14, np.float32))
+        if env.foot_contact_state["left"] and env.foot_contact_state["right"]:
+            break
+    env._bf_rot = 0.0
+    assert _bf_landed_hold(env) == 0.0
+    env._bf_rot = 2.0 * np.pi
+    assert _bf_landed_hold(env) > 0.3  # standing + credited flip pays
+
+
+def test_backflip_mid_roll_spawn_credits_rotation():
+    """A body posed halfway through the flip has, by definition, already
+    rotated halfway — the spawn presets the accumulator to match."""
+    from microduck_local.behaviors import _bf_spawn_mid_roll
+    env = _backflip_env()
+    obs = _bf_spawn_mid_roll(env)
+    assert obs.shape == (61,)
+    assert 1.2 < env._bf_rot < 4.4
+    g = env._projected_gravity()
+    # Attitude must match the credited rotation (gx = -sin(rot) for a pure
+    # backward pitch), and the spawn arrives still rolling backward.
+    assert abs(float(g[0]) - (-np.sin(env._bf_rot))) < 0.05
+    assert env.data.qvel[4] < 0.0
+
+
+def test_backflip_reset_clears_rotation():
+    env = _backflip_env()
+    env._bf_rot = 5.0
+    env.reset(seed=11)
+    valid = (env._bf_rot == 0.0 or abs(env._bf_rot - 2.0 * np.pi) < 1e-9
+             or 1.2 < env._bf_rot < 4.4)  # fresh, landed-spawn, or mid-roll
+    assert valid
+
+
+def test_spawn_family_probs_env_override(monkeypatch):
+    """A curriculum stage can override the spawn MIX, not just the window —
+    'learning to land' must actually be mostly landing spawns."""
+    env = _backflip_env()
+    monkeypatch.setenv("MICRODUCK_SPAWN_FAMILY_PROBS", "1.0,0.0")
+    env.reset(seed=3)
+    assert abs(env._bf_rot - 2.0 * np.pi) < 1e-9  # always the landed spawn
+    monkeypatch.setenv("MICRODUCK_SPAWN_FAMILY_PROBS", "0.0,1.0")
+    env.reset(seed=3)
+    assert 1.2 < env._bf_rot < 4.4                # always mid-roll
+    monkeypatch.setenv("MICRODUCK_SPAWN_FAMILY_PROBS", "bogus")
+    env.reset(seed=3)                             # malformed -> declared mix
+
+
+def test_spawn_overrides_beat_environ(monkeypatch):
+    """Per-instance stage knobs (BehaviorEnv(spawn_overrides=...)) win over
+    os.environ — the lab process hosts many preview envs at once, and each
+    must carry ITS stage; os.environ stays the trainer-subprocess channel."""
+    monkeypatch.setenv("MICRODUCK_BF_SPAWN_LO", "1.3")
+    monkeypatch.setenv("MICRODUCK_BF_SPAWN_HI", "1.35")
+    monkeypatch.setenv("MICRODUCK_SPAWN_FAMILY_PROBS", "1.0,0.0")
+    env = BehaviorEnv("backflip", spawn_overrides={
+        "MICRODUCK_BF_SPAWN_LO": "4.2", "MICRODUCK_BF_SPAWN_HI": "5.6",
+        "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0,1.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    for seed in range(8):
+        env.reset(seed=seed)
+        # Always the mid-roll family (override mix), inside the OVERRIDE
+        # window — not the environment's landed-only mix or tiny window.
+        assert 4.2 <= env._bf_rot <= 5.6
+    # Without instance overrides the env vars still rule (the trainer path).
+    env2 = BehaviorEnv("backflip", obs_noise=False, domain_rand=False,
+                       action_delay=False, random_yaw=False, seed=0)
+    env2.reset(seed=0)
+    assert abs(env2._bf_rot - 2 * np.pi) < 1e-9  # probs say always landed
+
+
+def test_headstand_mid_flip_window_knob():
+    """A headstand curriculum stage can march the tripod-spawn pitch window,
+    same pattern as the backflip's MICRODUCK_BF_SPAWN_LO/HI."""
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "0.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "1.0",
+        "MICRODUCK_MF_PITCH_LO": "2.35", "MICRODUCK_MF_PITCH_HI": "2.5"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    for seed in range(6):
+        env.reset(seed=seed)
+        assert env.last_spawn == "mid-flip"
+        q = env.data.qpos[3:7]  # pure-pitch spawn quat [cos p/2, 0, sin p/2, 0]
+        pitch = 2.0 * np.arctan2(float(q[2]), float(q[0]))
+        assert 2.35 <= pitch <= 2.5
+
+
+def test_headstand_mid_flip_slump_variant():
+    """MICRODUCK_MF_SLUMP_PROB spawns the measured dive-arrival slump —
+    deep pitch, trunk low, legs folded under — instead of the feet-planted
+    launch pad, so recovering from a botched dive is on-policy."""
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "0.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "1.0",
+        "MICRODUCK_MF_SLUMP_PROB": "1.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    for seed in range(6):
+        env.reset(seed=seed)
+        assert env.last_spawn == "mid-flip"
+        q = env.data.qpos[3:7]
+        pitch = 2.0 * np.arctan2(float(q[2]), float(q[0]))
+        assert 2.4 <= pitch <= 2.7          # ~137-155 deg nose-down
+        assert env.data.qpos[2] <= 0.09     # trunk LOW — a slump, not a pad
+
+
+def test_headstand_hold_pays_the_stack_not_the_tuck():
+    """User-specified success test: head on the ground, body ABOVE the head,
+    feet ABOVE that. The clean inverted-spawn stack must out-pay a folded
+    tuck of the same orientation — orientation alone used to pay a low tuck
+    with feet dangling at head height in full."""
+    import mujoco
+
+    # Raw (streak-free) pricing: this test grades POSES against each
+    # other; the persistence ramp is locked separately.
+    from microduck_local.behaviors import _headstand_hold_raw
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    from microduck_local.behaviors import _head_on_floor
+    env.reset(seed=1)  # clean near-vertical stack, legs ~straight up
+    # The spawn hovers a hair above the floor — lower it until the head
+    # actually touches (kinematic, no dynamics), as a settled hold would.
+    for _ in range(40):
+        if _head_on_floor(env):
+            break
+        env.data.qpos[2] -= 0.003
+        mujoco.mj_forward(env.model, env.data)
+    assert _head_on_floor(env), "could not settle the spawn into head contact"
+    # foot_contact_state is a per-step hoisted snapshot — refresh it after
+    # kinematic pushes (a real step does this itself).
+    env.foot_contact_state = env._foot_contacts()
+    v_clean = _headstand_hold_raw(env)
+    assert v_clean > 0.1, f"clean stack should pay, got {v_clean}"
+    # Fold hips+knees hard (tuck) at the same trunk attitude so the feet
+    # drop toward head height — try both fold directions and grade the one
+    # that actually lowers the feet (sign conventions differ per joint).
+    q = env.data.qpos
+    # Real flops also TIP: at ~146 deg (the measured dive-trap attitude)
+    # the folded legs hang at/below the trunk — an ORDERING violation
+    # (straight-up kinematics can't get feet under the trunk on this robot;
+    # a 160-deg bent-leg pose keeps feet above trunk and legitimately pays).
+    p = 2.55  # rad, ~146 deg — the dive-trap flop family
+    q[3:7] = [np.cos(p / 2), 0.0, np.sin(p / 2), 0.0]
+    lo_feet, v_tuck = None, None
+    for s in (1.0, -1.0):
+        for li, ri, val in ((2, 11, 1.6), (3, 12, 1.9), (4, 13, 1.2)):
+            q[env.joint_qpos_adr[li]] = -s * val
+            q[env.joint_qpos_adr[ri]] = s * val
+        # The observed tuck also carries the trunk LOW (renders: ~0.11 vs the
+        # clean stack's 0.165) — drop the root to match the real pose family.
+        q[2] = 0.115
+        mujoco.mj_forward(env.model, env.data)
+        env.foot_contact_state = env._foot_contacts()
+        zl = float(env.data.geom_xpos[env.foot_geoms["left"]][2])
+        zr = float(env.data.geom_xpos[env.foot_geoms["right"]][2])
+        fz = (zl + zr) / 2
+        if lo_feet is None or fz < lo_feet:
+            lo_feet, v_tuck = fz, _headstand_hold_raw(env)
+    # A two-joint kinematic fold only reaches feet ~0.14 above the head
+    # (real crumples bend everything and get to ~0.06, paying 3.5x less);
+    # lock the gradient direction and the ratio this pose can prove.
+    assert v_clean > 1.3 * v_tuck, (
+        f"tuck must pay under the stack: clean {v_clean}, tuck {v_tuck} "
+        f"(feet_z {lo_feet:.3f})")
+    # The toe-press pike (head down, hips folded, feet only ~22 cm up)
+    # used to collect almost full hold. Straight stack must clearly win.
+    from microduck_local.behaviors import _HS_HEAD_TUCK, _HS_NECK_TUCK
+    env.reset(seed=1)
+    q = env.data.qpos
+    p = np.deg2rad(152.0)
+    q[3:7] = [np.cos(p / 2), 0.0, np.sin(p / 2), 0.0]
+    q[2] = 0.12
+    q[env.joint_qpos_adr[5]] = _HS_NECK_TUCK
+    q[env.joint_qpos_adr[6]] = _HS_HEAD_TUCK
+    q[env.joint_qpos_adr[2]] = -1.2
+    q[env.joint_qpos_adr[11]] = 1.2
+    q[env.joint_qpos_adr[3]] = -1.4
+    q[env.joint_qpos_adr[12]] = 1.4
+    mujoco.mj_forward(env.model, env.data)
+    env.foot_contact_state = {"left": False, "right": False}
+    v_pike = _headstand_hold_raw(env)
+    assert v_clean > 1.5 * v_pike, (
+        f"toe-press pike must not collect hold: clean {v_clean}, pike {v_pike}")
+
+
+def test_headstand_slope_terms_pay_progress_not_state():
+    """The anti-parking contract: a duck HOLDING a pose earns nothing from
+    the slope terms (they pay only new episode-best progress), and a spawn
+    handout banks no slope money either (baseline anchors to the spawn pose).
+    Three graduates in a row parked at ~146° living off these terms when
+    they were per-step state pay."""
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    env.reset(seed=0)
+    hold = np.zeros(14, np.float32)  # hold the spawn pose: no progress
+    for _ in range(25):
+        env.step(hold)
+    sums = env.reward_sums
+    # body_lifted, feet_up and neck_tuck are deliberately excluded: they are
+    # per-step SALARIES for the stacked pose (see the recipe), and the
+    # anti-farming contract covers only the shepherds, which pay progress.
+    #
+    # sums[k], not sums.get(k, 0.0): this summed "head_low" and "nose_down"
+    # too, which are _hs_update POTENTIALS that were never registered as
+    # reward terms. get() scored both 0.0 forever, so the assertion silently
+    # covered two fewer terms than it named while reading as if it covered
+    # five — and it also carried neck_tuck, a salary whose legitimate
+    # per-step income ate the budget meant for detecting an annuity. Indexing
+    # makes a rename fail loudly instead of hollowing the test out again.
+    shepherds = ("upside_down", "feet_rise")
+    missing = [k for k in shepherds if k not in sums]
+    assert not missing, f"shepherd terms renamed or dropped: {missing}"
+    slope = sum(sums[k] for k in shepherds)
+    # Tiny settle-in drift is fine; a per-step annuity over 25 steps is not
+    # (state pay measured ~2.9/step here — 25 steps would be ~70). Parking
+    # measures about -49: symmetric shaping makes a settling duck GIVE BACK
+    # potential, so only the positive direction is the farming signal.
+    assert slope < 12.0, f"slope terms paid {slope:.1f} for sitting still"
+
+
+def test_reload_library_rolls_back_a_failing_recipe_edit(monkeypatch):
+    """A recipe edit that COMPILES but raises at import must leave the library
+    exactly as it was. Restoring only the failing module is not enough: core
+    reloads first and rebinds BEHAVIORS/CATALOG, so the modules after the
+    failure never re-register — leaving `match_behavior` denying tricks the
+    package still lists. Simulated by making the reload of a LATE submodule
+    raise, which is what a bad edit does at exec time."""
+    import importlib
+
+    import microduck_local.behaviors as B
+
+    before_behaviors = dict(B.BEHAVIORS)   # same objects, for identity checks
+    before_catalog_keys = sorted(B.CATALOG)
+    core_registry = B._core.BEHAVIORS
+
+    real_reload = importlib.reload
+    target = B._backflip.__name__
+
+    def reload_but_fail_on_backflip(m):
+        if m.__name__ == target:
+            raise NameError("_A_TYPO_IN_MY_EDIT")
+        return real_reload(m)
+
+    monkeypatch.setattr(B._importlib, "reload", reload_but_fail_on_backflip)
+    with pytest.raises(NameError):
+        B.reload_library()
+    monkeypatch.undo()
+
+    # Untouched: the rollback restores the very objects, not equal copies.
+    assert B.BEHAVIORS == before_behaviors
+    assert sorted(B.CATALOG) == before_catalog_keys
+    # The registry every core helper closes over must be the SAME object, or
+    # match_behavior reads a truncated dict while the package shows all nine.
+    assert B._core.BEHAVIORS is core_registry
+    assert B.BEHAVIORS is B._core.BEHAVIORS
+    assert B.match_behavior("do a backflip").id == "backflip"
+    assert B.match_behavior("do a headstand").id == "headstand"
+    # Deliberately NO real reload_library() here: a successful reload rebinds
+    # every Behavior and BehaviorEnv, and the tests defined after this one bind
+    # their names at import. The rollback restoring the ORIGINAL objects is
+    # exactly what makes this test safe to run mid-suite — assert that.
+    assert B.BEHAVIORS["headstand"] is before_behaviors["headstand"]
+    assert sorted(B.CATALOG) == before_catalog_keys
+
+
+def test_reload_modules_restores_a_module_that_raises_mid_exec(tmp_path,
+                                                              monkeypatch):
+    """`importlib.reload` re-executes a module in its LIVE dict, so an edit
+    that compiles but raises part-way leaves it HALF-NEW: names bound before
+    the raise hold the new values while everything after is stale. The lab hit
+    this on motion.py, which /teach reloads before the behaviors package —
+    it then served a Frankenstein clip module the trainer subprocess (always a
+    fresh import) would never run. Uses a throwaway module rather than the
+    real motion so no live class is rebound mid-suite."""
+    import importlib
+    import sys
+
+    from microduck_local import motion
+
+    src = tmp_path / "torn_reload_probe.py"
+    src.write_text('BEFORE = "v1"\nDELETED = "v1"\n'
+                   'def fn():\n    return "v1"\n')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    importlib.invalidate_caches()
+    mod = importlib.import_module("torn_reload_probe")
+    try:
+        # The edit: rebinds BEFORE, drops DELETED, would rewrite fn — and
+        # raises in between, the way a NameError in a fresh recipe line does.
+        src.write_text('BEFORE = "v2"\nraise RuntimeError("half-applied edit")\n'
+                       'def fn():\n    return "v2"\n')
+        importlib.invalidate_caches()
+        with pytest.raises(RuntimeError):
+            motion.reload_modules([mod])
+        assert mod.BEFORE == "v1", "kept a value from the edit that failed"
+        assert mod.fn() == "v1"
+        # The rollback has to REFILL the namespace it emptied, not just stop.
+        assert mod.DELETED == "v1"
+
+        # The tear itself, so this guarantee cannot quietly degrade back into
+        # a plain reload: same module, same edit, torn.
+        with pytest.raises(RuntimeError):
+            importlib.reload(mod)
+        assert mod.BEFORE == "v2" and mod.fn() == "v1"
+    finally:
+        sys.modules.pop("torn_reload_probe", None)
+
+
+def test_motion_reload_self_targets_the_live_motion_module(monkeypatch):
+    """viz_server's /teach reloads motion before the behaviors package; the
+    fix is for it to call motion.reload_self() instead of importlib.reload.
+    Deliberately does NOT reload for real — that rebinds Clip/load_clip on
+    fresh objects for every test that imported them at module scope, the same
+    hazard test_reload_library_rolls_back_a_failing_recipe_edit avoids."""
+    import sys
+
+    from microduck_local import motion
+
+    seen = []
+    monkeypatch.setattr(motion, "reload_modules",
+                        lambda mods, after=None: seen.append(list(mods)))
+    motion.reload_self()
+    assert seen == [[sys.modules["microduck_local.motion"]]]
+
+
+def test_flatten_reports_a_recipe_name_that_collides_with_the_package():
+    """`from . import core as _core` pins the BARE name `core` on the package
+    too, so all eight submodule names sit in _RESERVED beside the real
+    machinery — and _flatten used to skip a reserved name in silence. A recipe
+    author adding a module-level `env = ...` (or `core`, or `locomotion`) to
+    headstand.py had it dropped with no error and no log, and
+    `from microduck_local.behaviors import env` answered with the SUBMODULE.
+    Now it says so, and says nothing else has changed."""
+    import microduck_local.behaviors as B
+
+    env_module, machinery = B.env, B._SUBMODULES
+    headstand = B.BEHAVIORS["headstand"]
+
+    # An ordinary new recipe constant still flattens, and still un-flattens.
+    B._headstand._A_BRAND_NEW_KNOB = 1.23
+    B._flatten()
+    assert B._A_BRAND_NEW_KNOB == 1.23
+    del B._headstand._A_BRAND_NEW_KNOB
+    B._flatten()
+    assert not hasattr(B, "_A_BRAND_NEW_KNOB")
+
+    for module, name in ((B._headstand, "env"),        # a submodule's name
+                         (B._poses, "_SUBMODULES"),    # package machinery
+                         (B._poses, "vars")):          # a builtin _flatten calls
+        setattr(module, name, 0.3)
+        try:
+            with pytest.raises(NameError, match=name):
+                B._flatten()
+        finally:
+            delattr(module, name)
+
+    # Nothing was mutated on the way to any of those errors.
+    assert B.env is env_module and B._SUBMODULES is machinery
+    assert B.BEHAVIORS is B._core.BEHAVIORS
+    assert B.BEHAVIORS["headstand"] is headstand
+    B._flatten()          # leave the package as the rest of the suite found it
+    assert B.match_behavior("do a headstand").id == "headstand"
+
+
+def test_reload_library_rolls_back_when_a_reloaded_recipe_shadows_the_package(
+        monkeypatch):
+    """The re-flatten is part of "the reload succeeded", so a name clash found
+    there has to roll the MODULES back as well. Left reloaded, core's dict —
+    which every helper closes over — would hold the new registry while the
+    package namespace still showed the old one: `match_behavior` denying
+    tricks the catalog lists, the split brain the all-module rollback exists
+    to prevent. Same no-live-reload discipline as the rollback test above: the
+    rollback is what makes this safe to run mid-suite, so assert it."""
+    import importlib
+
+    import microduck_local.behaviors as B
+
+    before_behaviors = dict(B.BEHAVIORS)
+    core_registry = B._core.BEHAVIORS
+    real_reload = importlib.reload
+
+    def reload_and_shadow(m):
+        new = real_reload(m)
+        if new.__name__ == B._headstand.__name__:
+            new.env = 0.3     # the plausible recipe constant, post-exec
+        return new
+
+    monkeypatch.setattr(B._importlib, "reload", reload_and_shadow)
+    with pytest.raises(NameError, match="env"):
+        B.reload_library()
+    monkeypatch.undo()
+
+    assert B.BEHAVIORS["headstand"] is before_behaviors["headstand"]
+    assert B.BEHAVIORS["backflip"] is before_behaviors["backflip"]
+    assert B._core.BEHAVIORS is core_registry
+    assert B.BEHAVIORS is B._core.BEHAVIORS
+    assert not hasattr(B._headstand, "env")
+    assert B.match_behavior("do a headstand").id == "headstand"
+    assert B.match_behavior("do a backflip").id == "backflip"
+
+
+def test_headstand_ladder_carries_no_reward_edits():
+    """The ladder contract (user decision, 2026-09-01, reinstating the
+    champion's servo ladder): the headstand trains as a CHAIN whose stages
+    may ladder only PHYSICS, SPAWNS, and DEPTH — never the reward. The
+    sealed term set (locked by the tests around this one) is identical in
+    every stage, so no rung can grow its own leak — the failure mode of the
+    first staged era. Stage 1 must be the XML training-wheels drill (BAM
+    from scratch never ignites: ad85a8-s1, re-proven across five one-move
+    configs on 2026-09-01), and the finisher must keep standing reps ≤ 20%
+    (standing-heavy finals measurably destroyed working holds)."""
+    b = BEHAVIORS["headstand"]
+    assert len(b.curriculum) >= 4
+    ALLOWED = {"MICRODUCK_ACTUATOR", "MICRODUCK_BAM_CURRENT_SCALE",
+               "MICRODUCK_INVERTED_SPAWN_PROB", "MICRODUCK_MID_FLIP_SPAWN_PROB",
+               "MICRODUCK_EPISODE_S", "MICRODUCK_HS_GATE",
+               "MICRODUCK_INV_SPAWN_KICK", "MICRODUCK_MF_PITCH_LO",
+               "MICRODUCK_MF_PITCH_HI", "MICRODUCK_MF_SLUMP_PROB",
+               "MICRODUCK_MF_SPIN_MAX"}
+    for st in b.curriculum:
+        assert set(st.env) <= ALLOWED, f"stage '{st.label}' smuggles a knob"
+        assert st.env.get("MICRODUCK_EPISODE_S") == "8"  # 8s ignites, 20s doesn't
+    assert b.curriculum[0].env.get("MICRODUCK_ACTUATOR") == "xml"
+    assert b.curriculum[-1].env.get("MICRODUCK_ACTUATOR") == "bam"
+    last = b.curriculum[-1]
+    standing = 1.0 - float(last.env["MICRODUCK_INVERTED_SPAWN_PROB"]) \
+                   - float(last.env["MICRODUCK_MID_FLIP_SPAWN_PROB"])
+    assert standing <= 0.20 + 1e-9
+    keys = {t.key for t in b.terms}
+    assert "headstand_hold" in keys
+    assert "body_lifted" in keys
+    assert "legs_straight" in keys
+    assert "neck_tuck" in keys
+    assert "feet_up" in keys
+    # calm_up_top must stay OUT of the scratch recipe: -0.06*|w|^2 taxed the
+    # correction thrash a BAM learner needs (-1.08/step fleet-wide) while the
+    # motionless side-prop sat untaxed (removed 2026-09-01).
+    assert "calm_up_top" not in keys
+    # Same lesson: smoothness taxed catch-corrections harder than the hold
+    # paid (4d93a6: −1.9 vs +1.3). Polish-only, once a hold exists.
+    assert "smooth_moves" not in keys
+    assert "gentle_joints" not in keys
+    assert "save_energy" not in keys
+
+
+def test_headstand_inverted_spawn_plants_the_head():
+    """The drop-in spawn used to hover ~6 mm (hold = 0 on frame 0), so the
+    one start that's supposed to pay the stack never did and from-scratch
+    brains learned to crumple. After reset the crown must already be in
+    contact and both stack salaries must be live."""
+    from microduck_local.behaviors import (
+        _body_lifted,
+        _head_on_floor,
+        _headstand_hold,
+        _headstand_hold_raw,
+        _legs_straight_up,
+    )
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0",
+        "MICRODUCK_INV_SPAWN_KICK": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    for seed in range(8):
+        env.reset(seed=seed)
+        env.foot_contact_state = env._foot_contacts()
+        assert _head_on_floor(env), f"seed {seed} still hovering"
+        assert _headstand_hold_raw(env) > 0.1, (
+            f"seed {seed} planted stack should pay raw hold, got "
+            f"{_headstand_hold_raw(env)}")
+        # Persistence ramp (2026-09-01): at streak 0 the term pays the 0.3
+        # floor of raw — transits stay paid (ignition), dwelling pays 3.3x
+        # more (two capped-std graduates flickered at ~0.3 s under flat pay).
+        assert _headstand_hold(env) == pytest.approx(
+            0.3 * _headstand_hold_raw(env)), "streak-0 hold must be 0.3*raw"
+        assert _body_lifted(env) > 0.5, (
+            f"seed {seed} planted stack should pay tallness, got "
+            f"{_body_lifted(env)}")
+        assert _legs_straight_up(env) > 0.5, (
+            f"seed {seed} planted stack should pay straight legs, got "
+            f"{_legs_straight_up(env)}")
+
+
+def test_headstand_tallness_salary_zeros_the_heap():
+    """body_lifted is the anti-crumple salary: the measured parked heap
+    (feet down, trunk ~7 cm, still 'inverted') must pay ~0, or orientation
+    shaping's blind spot comes back."""
+    import mujoco
+
+    from microduck_local.behaviors import _body_lifted, _head_on_floor
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    env.reset(seed=1)
+    env.foot_contact_state = env._foot_contacts()
+    v_stack = _body_lifted(env)
+    assert v_stack > 0.5, f"planted stack should pay tallness, got {v_stack}"
+    # Measured crumple (f2b99e / 45b073 inverted drops): trunk ~0.07, feet
+    # planted, jaw on the floor, still nearly inverted.
+    q = env.data.qpos
+    q[2] = 0.072
+    p = np.deg2rad(168.0)
+    q[3:7] = [np.cos(p / 2), 0.0, np.sin(p / 2), 0.0]
+    for li, ri, val in ((2, 11, 1.2), (3, 12, 1.4), (4, 13, 0.8)):
+        q[env.joint_qpos_adr[li]] = -val
+        q[env.joint_qpos_adr[ri]] = val
+    mujoco.mj_forward(env.model, env.data)
+    # The live crumple plants both feet; a two-joint kinematic fold can
+    # leave them hovering, so name the contacts the term actually reads.
+    env.foot_contact_state = {"left": True, "right": True}
+    v_heap = _body_lifted(env)
+    assert v_heap < 0.05, (
+        f"feet-down heap must not collect tallness: stack {v_stack:.3f} "
+        f"heap {v_heap:.3f} head={_head_on_floor(env)} "
+        f"feet={env.foot_contact_state}")
+
+
+def _min_z_by_mat(env, substr: str) -> float:
+    import mujoco
+    m, d = env.model, env.data
+    zs = []
+    for i in range(m.ngeom):
+        matid = int(m.geom_matid[i])
+        mat = (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_MATERIAL, matid)
+               if matid >= 0 else "") or ""
+        if substr in mat:
+            zs.append(float(d.geom_xpos[i][2]))
+    assert zs, f"no geom with material containing {substr!r}"
+    return min(zs)
+
+
+def test_headstand_inverted_spawn_plants_the_crown():
+    """Same-sign neck/head (−0.6, −0.6) planted the FACE (eye/lens below
+    the crown). Opposite-sign tuck must put the skull on the floor and
+    the face several centimetres above it."""
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0",
+        "MICRODUCK_INV_SPAWN_KICK": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    env.reset(seed=1)
+    crown = _min_z_by_mat(env, "top_head_shell")
+    face = _min_z_by_mat(env, "face_part")
+    eye = _min_z_by_mat(env, "noenoeil")
+    assert face - crown > 0.02, (
+        f"face should sit above the crown: crown={crown:.3f} face={face:.3f}")
+    assert eye - crown > 0.02, (
+        f"eyes should sit above the crown: crown={crown:.3f} eye={eye:.3f}")
+    bottom = _min_z_by_mat(env, "bottom_head_shell")
+    assert bottom - crown > 0.004, (
+        f"must rest on the rounded crown, not the underside: "
+        f"crown={crown:.3f} bottom={bottom:.3f}")
+    gx = float(env._projected_gravity()[0])
+    assert gx > 0.25, (
+        f"must be a forward / nose-down roll on the crown, not a backbend "
+        f"(gx={gx:.2f})")
+
+
+def test_headstand_neck_tuck_pays_crown_not_home():
+    """Action 0 is DEFAULT_POSE (neck +0.35) — the standing 'head upright'
+    look, which on an inverted body plants the FACE. Spawn already tucks
+    (neck−, head+); untucking or the old same-sign 'tuck' must lose the
+    salary."""
+    import mujoco
+
+    from microduck_local import contract as C
+    from microduck_local.behaviors import _neck_tuck
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    env.reset(seed=1)
+    env.foot_contact_state = env._foot_contacts()
+    v_tuck = _neck_tuck(env)
+    q = env.data.qpos
+    q[env.joint_qpos_adr[5]] = C.DEFAULT_POSE[5]
+    q[env.joint_qpos_adr[6]] = C.DEFAULT_POSE[6]
+    mujoco.mj_forward(env.model, env.data)
+    env.foot_contact_state = env._foot_contacts()
+    v_home = _neck_tuck(env)
+    q[env.joint_qpos_adr[5]] = -0.6
+    q[env.joint_qpos_adr[6]] = -0.6
+    mujoco.mj_forward(env.model, env.data)
+    env.foot_contact_state = env._foot_contacts()
+    v_face = _neck_tuck(env)
+    assert v_tuck > 0.5, f"spawn tuck should pay, got {v_tuck}"
+    assert v_tuck > 2.0 * v_home, (
+        f"upright neck must not collect tuck: tucked {v_tuck:.3f} "
+        f"home {v_home:.3f}")
+    assert v_tuck > 2.0 * v_face, (
+        f"same-sign face-plant must not collect tuck: tucked {v_tuck:.3f} "
+        f"face {v_face:.3f}")
+
+
+def test_headstand_salaries_zero_the_backward_rest():
+    """gz is symmetric: a back-of-head rest is just as 'inverted' as the
+    front crown-roll. Without the hold's g[0] < -0.12 gate on every
+    per-step salary, that camp collected ~6/step for free (body_lifted +
+    legs_straight + neck_tuck + feet_up) against a tiny wrong_way charge.
+    Front spawn must still pay; the backbend must not."""
+    import mujoco
+
+    from microduck_local.behaviors import (
+        _body_lifted,
+        _feet_up,
+        _legs_straight_up,
+        _neck_tuck,
+    )
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0",
+        "MICRODUCK_INV_SPAWN_KICK": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    env.reset(seed=1)
+    env.foot_contact_state = env._foot_contacts()
+    front = {
+        "neck_tuck": _neck_tuck(env),
+        "legs_straight": _legs_straight_up(env),
+        "feet_up": _feet_up(env),
+        "body_lifted": _body_lifted(env),
+    }
+    assert front["neck_tuck"] > 0.3, front
+    assert front["legs_straight"] > 0.3, front
+    assert front["feet_up"] > 0.1, front
+    # Mirror the spawn through vertical: same stack, gx flipped (backbend).
+    q = env.data.qpos
+    p = 2.0 * np.pi - 2.0 * np.arctan2(float(q[5]), float(q[3]))  # 360° - pitch
+    q[3:7] = [np.cos(p / 2), 0.0, np.sin(p / 2), 0.0]
+    mujoco.mj_forward(env.model, env.data)
+    env.foot_contact_state = {"left": False, "right": False}
+    gx = float(env._projected_gravity()[0])
+    assert gx < -0.12, f"backbend pose should have gx<0, got {gx:.2f}"
+    back = {
+        "neck_tuck": _neck_tuck(env),
+        "legs_straight": _legs_straight_up(env),
+        "feet_up": _feet_up(env),
+        "body_lifted": _body_lifted(env),
+    }
+    for k, v in back.items():
+        assert v < 0.05, f"{k} still pays the backward rest: {v:.3f} (gx={gx:.2f})"
+
+
+def test_headstand_feet_up_requires_both_feet_off():
+    """A planted-foot bow used to collect feet_up from one waving foot /
+    still-high kinematics. Both feet must be off the floor."""
+    from microduck_local.behaviors import _feet_up
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0",
+        "MICRODUCK_INV_SPAWN_KICK": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    env.reset(seed=1)
+    env.foot_contact_state = env._foot_contacts()
+    v_air = _feet_up(env)
+    env.foot_contact_state = {"left": True, "right": True}
+    v_down = _feet_up(env)
+    assert v_air > 0.2, f"spawn feet-up should pay, got {v_air}"
+    assert v_down < 0.05, f"feet-down bow must not collect feet_up, got {v_down}"
+
+
+def test_headstand_face_plant_pen_zeros_on_crown_only():
+    """Crown-only spawn is free; a face-lean (HOME neck, ~146°) is charged."""
+    import mujoco
+
+    from microduck_local import contract as C
+    from microduck_local.behaviors import _face_on_floor_pen
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0",
+        "MICRODUCK_INV_SPAWN_KICK": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    env.reset(seed=1)
+    assert _face_on_floor_pen(env) == 0.0, "crown spawn must not be charged"
+    q = env.data.qpos
+    p = np.deg2rad(146.0)
+    q[3:7] = [np.cos(p / 2), 0.0, np.sin(p / 2), 0.0]
+    q[2] = 0.08
+    q[env.joint_qpos_adr[5]] = C.DEFAULT_POSE[5]
+    q[env.joint_qpos_adr[6]] = C.DEFAULT_POSE[6]
+    mujoco.mj_forward(env.model, env.data)
+    assert _face_on_floor_pen(env) < 0.0, "face-lean must be charged"
+
+
+def test_headstand_overshoot_does_not_end_the_episode():
+    """The covenant's contract: falling NEVER ends a headstand episode —
+    "it can try, crumble, and try again." The gx < -0.2 overshoot terminal
+    (removed 2026-09-01) priced every unfold attempt at catastrophe: from
+    the balanced tuck-ball the likeliest failure of extending is a backward
+    topple, and ending the episode forfeited all remaining income — so
+    ball-converged brains never risked the unfold (943186: feet_up income
+    3x'd, extension frozen). The backward route is priced by the per-step
+    wrong_way penalty instead."""
+    import mujoco
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0",
+        "MICRODUCK_INV_SPAWN_KICK": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+    env.reset(seed=1)
+    a = np.zeros(14, np.float32)
+    _, _, term, _, _ = env.step(a)
+    assert not term, "crown spawn must not be terminal"
+    p = np.deg2rad(200.0)  # past vertical, gx negative
+    q = env.data.qpos
+    q[3:7] = [np.cos(p / 2), 0.0, np.sin(p / 2), 0.0]
+    mujoco.mj_forward(env.model, env.data)
+    _, _, term, _, _ = env.step(a)
+    assert not term, "overshoot must NOT end the episode (attempt tax)"
+
+
+def test_every_headstand_salary_carries_the_roll_gate():
+    """The side-prop kickstand (a ~37 deg lean on the head-shell edge, gz 0.75)
+    is statically stable and pays nothing to hold — so EVERY positive
+    headstand term must consult _hs_too_rolled, catalog terms included. It was
+    added to five of six; feet_on_top (a teach-panel slider) was the gap."""
+    import mujoco
+
+    from microduck_local.behaviors import (
+        _HS_HEAD_TUCK,
+        _HS_NECK_TUCK,
+        _body_lifted,
+        _feet_on_top,
+        _feet_up,
+        _head_on_floor,
+        _headstand_hold_raw,
+        _legs_straight_up,
+        _neck_tuck,
+    )
+    env = BehaviorEnv("headstand", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    d = env.data
+    pitch, roll = np.pi - 0.35, 0.65          # the measured kickstand pose
+    cp, sp = np.cos(pitch / 2), np.sin(pitch / 2)
+    cr, sr = np.cos(roll / 2), np.sin(roll / 2)
+    d.qpos[:] = 0.0
+    d.qpos[3:7] = [cp * cr, cp * sr, sp * cr, sp * sr]
+    d.qpos[2] = 0.165
+    for adr in env.joint_qpos_adr:
+        d.qpos[adr] = 0.0
+    d.qpos[env.joint_qpos_adr[5]] = _HS_NECK_TUCK
+    d.qpos[env.joint_qpos_adr[6]] = _HS_HEAD_TUCK
+    d.qvel[:] = 0.0
+    mujoco.mj_forward(env.model, d)
+    for _ in range(90):
+        if _head_on_floor(env):
+            break
+        d.qpos[2] -= 0.002
+        mujoco.mj_forward(env.model, d)
+    env.foot_contact_state = env._foot_contacts()
+    assert abs(float(env._projected_gravity()[1])) > 0.35   # genuinely rolled
+    for fn in (_headstand_hold_raw, _body_lifted, _legs_straight_up,
+               _feet_up, _neck_tuck, _feet_on_top):
+        assert fn(env) == 0.0, f"{fn.__name__} pays the side-prop kickstand"
+
+
+def test_headstand_roll_gate_allows_catch_wobble_kills_kickstand():
+    """|g[1]| > 0.35 (≈20°) zeroed a BAM catch's salaries. 25° must still
+    pay; the 37° side-prop (g[1]≈0.60) must not."""
+    import mujoco
+
+    from microduck_local.behaviors import _legs_straight_up
+    env = BehaviorEnv("headstand", spawn_overrides={
+        "MICRODUCK_INVERTED_SPAWN_PROB": "1.0",
+        "MICRODUCK_MID_FLIP_SPAWN_PROB": "0.0",
+        "MICRODUCK_INV_SPAWN_KICK": "0.0"},
+        obs_noise=False, domain_rand=False, action_delay=False,
+        random_yaw=False, seed=0)
+
+    def roll(deg):
+        env.reset(seed=1)
+        p = 2.0 * np.arctan2(float(env.data.qpos[5]), float(env.data.qpos[3]))
+        r = np.deg2rad(deg)
+        cp, sp = np.cos(p / 2), np.sin(p / 2)
+        cr, sr = np.cos(r / 2), np.sin(r / 2)
+        env.data.qpos[3:7] = [cp * cr, cp * sr, sp * cr, sp * sr]
+        mujoco.mj_forward(env.model, env.data)
+        env.foot_contact_state = {"left": False, "right": False}
+        return _legs_straight_up(env), abs(float(env._projected_gravity()[1]))
+
+    v25, g25 = roll(25)
+    v37, g37 = roll(37)
+    assert g25 < 0.50 < g37, f"g1 25°={g25:.2f} 37°={g37:.2f}"
+    assert v25 > 0.3, f"25° catch wobble must still pay, got {v25}"
+    assert v37 < 0.05, f"37° kickstand must not pay, got {v37}"
+
+
+# ------------------------------------------------- the bilateral mirror prior
+
+
+def test_run_training_path_uses_bam_and_domain_rand(monkeypatch):
+    """The trainer, not the unit-test env, is where BAM/DR have to be on —
+    otherwise local run is a different plant from GPU run."""
+    monkeypatch.delenv("MICRODUCK_ACTUATOR", raising=False)
+    from microduck_local.train_behavior import make_env
+
+    trick = make_env("stand", 0, 0)()
+    assert trick.actuator_model == "xml"
+    assert trick.domain_rand is False
+    assert trick.random_yaw is False
+
+    run = make_env("run", 0, 0)()
+    assert run.actuator_model == "bam"
+    assert run.domain_rand is True
+    assert run.random_yaw is True
+    assert run.height_termination is False
+
+
+def test_run_recipe_matches_gpu_run_not_walk():
+    """The local run recipe is a port of microduck_run_env_cfg, not velocity.
+
+    Walk weights (air_time 3 > speed 2, pose running-std dead, extra
+    face_home/hold_the_line) priced running out of the optimum. GPU run
+    makes speed the largest term, wakes the running pose, and drops the
+    local-only heading/crab taxes."""
+    terms = {t.key: t for t in BEHAVIORS["run"].terms}
+    assert terms["keep_pace"].weight == pytest.approx(4.0)
+    assert terms["air_time"].weight == pytest.approx(3.0)
+    assert terms["stay_upright"].weight == pytest.approx(2.0)
+    assert terms["track_turn"].weight == pytest.approx(2.0)
+    assert terms["pose"].weight == pytest.approx(1.0)
+    assert terms["head_up"].weight == pytest.approx(3.5)  # head-drop priced (see recipe)
+    assert "natural_pose" not in terms
+    assert "gentle_joints" not in terms
+    assert "go_straight" not in terms
+    assert "save_energy" not in terms
+    # face_home / hold_the_line are BACK by explicit user request ("it's not
+    # walking straight — we don't have a reward for keeping its initial
+    # orientation"): track_turn prices yaw RATE only, so a lazy arc was free.
+    # What hurt before was the UNBOUNDED face_home at weight 3 (-74/step
+    # worst); both anchors are now bounded to one unit at weight 1, small
+    # against the ~9-point positive budget. Locked the other way by
+    # test_penalty_scale.test_run_recipe_anchors_absolute_heading_and_line.
+    # Anchors OUT again — not as "GPU purity" but because the policy is
+    # compass-blind (no yaw in the 61 obs); see
+    # test_run_recipe_has_no_unobservable_terms. Steering owns the heading.
+    assert "face_home" not in terms
+    assert "hold_the_line" not in terms
+    # Smoothness weight is 1.0: the 0.1→0.5 GPU schedule lives inside the fn.
+    assert terms["smooth_moves"].weight == pytest.approx(1.0)
+    from microduck_local.behaviors import _run_action_rate_weight
+    assert _run_action_rate_weight(0) == pytest.approx(0.1)
+    assert _run_action_rate_weight(int(3000 * 24 * _RUN_STAGE_SCALE)) == pytest.approx(0.5)
+    assert BEHAVIORS["run"].episode_s == pytest.approx(20.0)
+    assert BEHAVIORS["run"].forward_cmd == pytest.approx(0.6)
+
+
+def test_only_the_one_sided_recipes_opt_out_of_the_mirror_prior():
+    """The audit, as a lock. `Behavior.symmetric` decides whether the trainer
+    adds symmetry.py's mirror loss, so a new recipe that names a side (or
+    imitates a clip) has to be listed here — the default is True and silence
+    would train it under a wrong prior."""
+    asymmetric = {b.id for b in BEHAVIORS.values() if not b.symmetric}
+    # find_ball: from a symmetric start (ball unseen, memory empty) a
+    # mirror-consistent policy must output a zero yaw sweep — it cannot pick
+    # a side to look first, so the exported mean would sit and stare.
+    assert asymmetric == {"one_leg", "one_leg_hop", "alternate_hop", "bunny_hop", "imitate", "find_ball", "kick_left", "kick_right",
+                          "kick_left_wide", "kick_right_wide",     # the box kicks name a foot too (12b)
+                          "kick_left_sensed", "kick_right_sensed",   # ...and so do the sensed ones (12h)
+                          # ...and the far-range pair, which is the same recipe with a
+                          # 0.60 m range slot instead of 0.25 (12as's next cut).
+                          "kick_left_sensed_far", "kick_right_sensed_far"}
+    # spin stays mirror-safe: the direction COMMAND rides the wz slot, and
+    # the mirror map negates that slot and the gyro together, so a mirrored
+    # episode is just the opposite commanded direction. The rest are sagittal
+    # or two-footed.
+    for bid in ("spin", "run", "stand", "crouch", "backflip", "airflip",
+                "headstand"):
+        assert BEHAVIORS[bid].symmetric, bid
+
+
+def _side_scores(behavior_id: str, down: str, up: str) -> float:
+    """Total recipe score with `down` in contact and `up` in the air, holding
+    the BODY fixed — so the only thing that varies is which foot is named."""
+    env = BehaviorEnv(behavior_id, obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    for _ in range(20):  # settle the drop-in so the pose is a real stance
+        env.step(np.zeros(14, np.float32))
+    env.foot_contact_state = {down: True, up: False}
+    return sum(t.weight * (-1.0 if t.is_penalty else 1.0) * t.fn(env)
+               for t in BEHAVIORS[behavior_id].terms)
+
+
+def test_one_leg_is_asymmetric_in_its_reward_not_just_its_flag():
+    """`symmetric=False` is a claim about the recipe, so check the recipe.
+    Swapping which foot is down — the same body, only the side renamed —
+    moves one_leg's score hard (~3.0 of reward), because one_leg_hold,
+    foot_in_air and planted_foot all read a foot by NAME."""
+    left_down = _side_scores("one_leg", "left", "right")
+    right_down = _side_scores("one_leg", "right", "left")
+    assert left_down - right_down > 1.0, (
+        f"one_leg scored {left_down:.3f} on the left foot vs {right_down:.3f} "
+        "on the right — if these matched, the mirror loss would cost nothing"
+    )
+    # A symmetric recipe is indifferent to the same swap: nothing to fight.
+    assert abs(_side_scores("stand", "left", "right")
+               - _side_scores("stand", "right", "left")) < 1e-6
+
+
+def test_one_leg_hop_is_left_sided_clocked_and_ladders_only_strictness_and_physics():
+    """A static one-leg score cannot describe a repeating hop: the policy
+    needs a clock, real flight, and an asymmetric left-support contract."""
+    from microduck_local.behaviors import _hop_contact_cycle, _hop_obs, _hop_pre_step
+
+    b = BEHAVIORS["one_leg_hop"]
+    assert not b.symmetric and not b.height_termination
+    assert len(b.curriculum) == 4
+    assert b.curriculum[0].env["MICRODUCK_ACTUATOR"] == "xml"
+    assert b.curriculum[-1].env["MICRODUCK_ACTUATOR"] == "bam"
+    assert float(b.curriculum[0].env["MICRODUCK_HOP_CLEARANCE"]) < float(
+        b.curriculum[-1].env["MICRODUCK_HOP_CLEARANCE"])
+
+    env = BehaviorEnv("one_leg_hop", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    env.step_count = 0
+    _hop_obs(env)
+    assert env.twist_cmd[0] > 0
+    assert env.body_cmd[4] == pytest.approx(0.0, abs=1e-9)
+    assert env.body_cmd[5] == pytest.approx(1.0, abs=1e-9)
+
+    # Loading wants left-only support; the landing window explicitly accepts
+    # the user's requested two-foot touchdown.
+    env.foot_contact_state = {"left": True, "right": False}
+    assert _hop_contact_cycle(env) == pytest.approx(1.0)
+    env.step_count = round(0.7 * 36)
+    env.foot_contact_state = {"left": True, "right": True}
+    assert _hop_contact_cycle(env) == pytest.approx(1.0)
+
+    # The discovery rung creates the otherwise-unsampled airborne state; the
+    # final BAM rung seals that assistance back to exactly zero.
+    assert float(b.curriculum[0].env["MICRODUCK_HOP_ASSIST"]) > 0
+    assert float(b.curriculum[-1].env["MICRODUCK_HOP_ASSIST"]) == 0
+    env.spawn_overrides["MICRODUCK_HOP_ASSIST"] = "0.65"
+    env.step_count = round(0.25 * 36)
+    env.foot_contact_state = {"left": True, "right": False}
+    env.data.qvel[2] = 0.0
+    env._hop_assist_cycle = -1
+    _hop_pre_step(env)
+    assert env.data.qvel[2] == pytest.approx(0.65)
+
+
+def test_alternating_hop_switches_support_side_and_removes_assist(monkeypatch):
+    from microduck_local.behaviors import (
+        _alt_contact_cycle,
+        _alt_forward,
+        _alt_obs,
+        _alt_pre_step,
+        _alt_state,
+    )
+    from microduck_local.behaviors import hop as hop_module
+
+    b = BEHAVIORS["alternate_hop"]
+    assert {"spring_height", "push_up"} <= {t.key for t in b.terms}
+    assert len(b.curriculum) == 4
+    assert float(b.curriculum[-1].env["MICRODUCK_HOP_ASSIST"]) == 0.0
+    env = BehaviorEnv("alternate_hop", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0,
+                      spawn_overrides={"MICRODUCK_HOP_ASSIST": "0.6"})
+    env.reset(seed=0)
+    env.step_count = 0
+    _alt_obs(env)
+    assert env.body_cmd[4] == pytest.approx(0.0, abs=1e-9)
+    assert env.body_cmd[5] == pytest.approx(1.0, abs=1e-9)
+    env.foot_contact_state = {"left": True, "right": False}
+    assert _alt_contact_cycle(env) == pytest.approx(1.0)
+    env.step_count = round(0.5 * 50)
+    env.foot_contact_state = {"left": False, "right": True}
+    assert _alt_contact_cycle(env) == pytest.approx(1.0)
+
+    env.step_count = round(0.20 * 50)
+    env.foot_contact_state = {"left": True, "right": False}
+    env.data.qvel[2] = 0.0
+    env._alt_assist_half = -1
+    _alt_pre_step(env)
+    assert env.data.qvel[2] == pytest.approx(0.6)
+
+    # Walking on the floor may keep its discovery slope, but cannot collect
+    # the full travel budget until a real airborne state was sampled.
+    monkeypatch.setattr(hop_module, "_hop_forward", lambda _env: 0.8)
+    env._alt_last_air_step = -10_000
+    assert _alt_forward(env) == pytest.approx(0.08)
+    env.foot_contact_state = {"left": False, "right": False}
+    _alt_state(env)
+    assert _alt_forward(env) == pytest.approx(0.8)
+
+
+def test_bunny_hop_requires_both_feet_and_removes_the_launch_impulse():
+    from microduck_local.behaviors import (
+        _bunny_contact_cycle,
+        _bunny_obs,
+        _bunny_pre_step,
+    )
+
+    b = BEHAVIORS["bunny_hop"]
+    assert len(b.curriculum) == 3
+    assert {"spring_height", "push_up", "get_air"} <= {t.key for t in b.terms}
+    assert float(b.curriculum[-1].env["MICRODUCK_HOP_ASSIST"]) == 0.0
+    env = BehaviorEnv("bunny_hop", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0,
+                      spawn_overrides={"MICRODUCK_HOP_ASSIST": "0.6"})
+    env.reset(seed=0)
+    env.step_count = 0
+    _bunny_obs(env)
+    env.foot_contact_state = {"left": True, "right": True}
+    assert _bunny_contact_cycle(env) == pytest.approx(1.0)
+    env.foot_contact_state = {"left": True, "right": False}
+    assert _bunny_contact_cycle(env) == pytest.approx(0.0)
+
+    env.step_count = round(0.32 * 40)
+    env.foot_contact_state = {"left": True, "right": True}
+    env.data.qvel[2] = 0.0
+    env._bunny_assist_cycle = -1
+    _bunny_pre_step(env)
+    assert env.data.qvel[2] == pytest.approx(0.6)
+
+
+def test_backflip_brake_charges_only_completed_overroll():
+    """Over-rolling was FREE (progress caps at 2*pi but nothing charged the
+    leftover momentum) — the user watched second rolls and butt-landings.
+    The brake must charge residual back-spin ONLY once rotation is complete,
+    never mid-flip where that spin IS the trick."""
+    from microduck_local.behaviors import _BF_FULL, _bf_brake_pen
+
+    env = _backflip_env()
+    env._gyro[:] = (0.0, -4.0, 0.0)     # hard backward spin
+    env._bf_rot = 0.5 * _BF_FULL        # mid-flip: spin is the trick
+    assert _bf_brake_pen(env) == 0.0
+    env._bf_rot = _BF_FULL              # flip complete: brake it
+    pen = _bf_brake_pen(env)
+    assert -1.0 <= pen < 0.0
+    env._gyro[:] = (0.0, 4.0, 0.0)      # forward correction is fine
+    assert _bf_brake_pen(env) == 0.0
+
+
+def test_jaw_parking_is_priced_but_the_neck_kip_is_free():
+    """Stage 5 once converged to resting its jaw on the floor for whole
+    episodes (rent-free under impact-only gentle_head) instead of flipping.
+    Occupancy is charged pre-flip only — mid-roll head contact IS the trick."""
+    from microduck_local.behaviors import _bf_no_jaw_parking_pen, _jaw_bid
+
+    env = _backflip_env()
+    env._bf_rot = 0.0
+    env.data.xpos[_jaw_bid(env)][2] = 0.07   # parked
+    assert -1.0 <= _bf_no_jaw_parking_pen(env) < 0.0
+    env._bf_rot = 1.5                        # mid-roll: kip is free
+    assert _bf_no_jaw_parking_pen(env) == 0.0
+    env._bf_rot = 0.0
+    env.data.xpos[_jaw_bid(env)][2] = 0.20   # standing headroom: free
+    assert _bf_no_jaw_parking_pen(env) == 0.0
+
+
+def test_push_off_pays_the_right_momentum_not_the_most():
+    """min(1, rate/6) paid full marks for ANY spin >= 6 rad/s — over-rotation
+    was manufactured at launch and then taxed at the landing. The band pays
+    most at the ~5 rad/s a clean entry needs, less for excess, and keeps a
+    discovery slope from zero."""
+    from microduck_local.behaviors import _bf_push_off
+
+    env = _backflip_env()
+    env._bf_rot = 0.1
+    def pay(rate):
+        env._gyro[:] = (0.0, -rate, 0.0)
+        return _bf_push_off(env)
+    assert pay(5.0) > pay(8.0), "excess momentum must pay less than the target"
+    assert pay(5.0) > pay(2.0)
+    assert pay(2.0) > pay(0.5) > pay(0.0) >= 0.0   # discovery slope alive
+    assert pay(5.0) == pytest.approx(1.0, abs=0.01)
+
+
+def test_straight_flip_prices_the_pivot_arc_hardest():
+    """Measured: ~98 deg of yaw wobble accrues while the body pivots on the
+    head and ~114 in the carry, vs 3.5 at launch — the body slews on the head
+    contact like a top (the head JOINTS stay still; still_head already
+    works). Off-axis rate costs 3x only in that arc."""
+    from microduck_local.behaviors import _bf_straight_pen
+
+    env = _backflip_env()
+    env.data.sensordata[env.gyro_adr] = (1.0, 0.0, 1.0)
+    env._bf_rot = 0.3                      # launch: gentle
+    launch = _bf_straight_pen(env)
+    env._bf_rot = 2.0                      # head-pivot: 3x
+    pivot = _bf_straight_pen(env)
+    assert pivot == pytest.approx(3.0 * launch, rel=1e-6)
+    assert -1.0 <= pivot < 0.0
+
+
+def test_spin_anchors_position_not_just_velocity():
+    """stay_put prices drift SPEED — a slow shuffle beats it. The spin now
+    also carries the bounded position anchor (user request: stay at the
+    origin), the same mechanism that keeps stand/one_leg planted."""
+    from microduck_local.behaviors import BEHAVIORS, _stay_home_pen
+
+    terms = {t.key: t for t in BEHAVIORS["spin"].terms}
+    assert "stay_home" in terms and terms["stay_home"].is_penalty
+    env = BehaviorEnv("spin", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    env.home_xy = (0.0, 0.0)
+    env._trunk_xpos[0:2] = (1.0, 1.0)   # far from home: saturated, bounded
+    assert _stay_home_pen(env) == pytest.approx(-1.0)
+
+
+def test_step_dont_skid_pays_stepping_not_scooting():
+    """The spin was yawing by pivoting planted feet (skid-steer scooting).
+    The catalog term pays only while ROTATING (observable |wz|) for feet in a
+    stride-like flight window — planted-feet scooting earns zero."""
+    from microduck_local.behaviors import _step_dont_skid
+
+    env = BehaviorEnv("spin", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    env._gyro[:] = (0.0, 0.0, 3.0)          # spinning
+    env.foot_contact_state = {"left": True, "right": True}
+    assert _step_dont_skid(env) == 0.0       # scooting: planted feet earn nothing
+    env.foot_contact_state = {"left": False, "right": True}
+    for _ in range(4):                        # 0.08 s airborne -> in window
+        pay = _step_dont_skid(env)
+    assert pay == pytest.approx(0.5)
+    env._gyro[:] = (0.0, 0.0, 0.0)           # not rotating: no rent for hopping
+    assert _step_dont_skid(env) == 0.0
+    env.reset(seed=1)
+    assert env._skid_air == {"left": 0.0, "right": 0.0}
+
+
+def test_spin_pays_the_commanded_direction_not_a_wiggle():
+    """abs(wz) paid a pelvis wiggle almost as well as a true spin (zero net
+    rotation — the user watched it). Signed pay: commanded direction earns,
+    against-command charges, so oscillation nets ~zero."""
+    from microduck_local.behaviors import _spin_rate
+
+    env = BehaviorEnv("spin", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    env._spin_dir = 1.0
+    env._gyro[:] = (0.0, 0.0, 3.0)
+    fwd = _spin_rate(env)
+    env._gyro[:] = (0.0, 0.0, -3.0)
+    back = _spin_rate(env)
+    assert fwd == pytest.approx(0.6) and back == pytest.approx(-0.6)
+    assert fwd + back == pytest.approx(0.0)   # a wiggle nets zero
+    # the direction command is in the OBSERVABLE wz slot every observation
+    obs = env._get_obs()
+    assert abs(float(obs[50])) == pytest.approx(1.0)
+
+
+# ------------------------------------------------------------- find_ball
+
+def _ball_env(seed=0, **kw):
+    env = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=seed, **kw)
+    env.reset(seed=seed)
+    return env
+
+
+def test_find_ball_rides_the_head_slots_and_nothing_else():
+    """The ball's detector output lives in obs[51:55] (bx, by, seen, memory)
+    and the twist stays a trick's pinned zero. Placing the ball straight
+    ahead at 1 m must read as seen, centred horizontally and BELOW centre
+    (the camera is 25 cm up and level at STAND).
+
+    The NEAR end has moved twice with the camera and it is worth knowing
+    which end of it this is. The 62 deg placeholder VFOV (half-angle 31) put
+    a ball at 0.3 m under the frame; the real module read PORTRAIT (116 deg
+    up the robot's view, half-angle 58) put the whole spawn window in frame
+    at a level gaze; and the module as it is actually MOUNTED — landscape,
+    116 across and 60 up, half-angle 30 on this axis (2026-09-11) — puts the
+    near end back under it. So the nearest thing the spawner can produce is
+    out of frame level again: see test_find_ball_near_balls_need_a_nod_again.
+    """
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    np.testing.assert_allclose(obs[48:51], 0.0, atol=1e-6)
+    assert obs[53] == 1.0
+    assert abs(obs[51]) < 0.05 and -1.0 < obs[52] < -0.2
+    assert abs(obs[54]) < 0.02          # memory = body bearing / pi = 0
+    # Still below centre, and further down than the 1 m ball.
+    far_by = obs[52]
+    _ball_place(env, 0.5, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    assert obs[53] == 1.0 and obs[52] < far_by
+    # ...and past the bottom edge of the frame it stops being seen at all,
+    # which under the landscape mount happens INSIDE the spawn window
+    # (measured: the edge lands at ~0.45 m from the trunk, level).
+    _ball_place(env, 0.3, 0.0)
+    _ball_sense(env, force=True)
+    assert env._get_obs()[53] == 0.0
+
+
+def test_find_ball_near_balls_need_a_nod_again():
+    """The recipe's near-floor pitch band is LOAD-BEARING under the camera the
+    robot actually has, and this is the test that says so.
+
+    The band exists because a ball closer than ~0.5 m sits BELOW a level gaze:
+    the camera is 0.25 m up and the ball 0.035, so the near end of the spawn
+    window (0.3 m) is 35 deg down. Whether that is inside the frame is exactly
+    the mount question — half-angle 58 deg (portrait, 116 up the view) says
+    yes and the recipe's pitch bands are decoration; half-angle 30 deg
+    (landscape, 116 ACROSS and 60 up, which is how the module is mounted —
+    2026-09-11, matching `sensors/detector.py` and docs/camera-hardware.md)
+    says no. Measured here, at the default camera: the frame's bottom edge
+    lands at about 0.45 m, so the near end of the window needs a nod and a
+    HEAD_PITCH of +0.30 off HOME is already enough to hold the WHOLE window,
+    0.3 m to 1.5 m, at once.
+
+    Locked both ways, so that a remount in either direction fails here loudly
+    rather than quietly making the pitch bands load-bearing or ornamental."""
+    import mujoco
+
+    from microduck_local import contract as C
+    from microduck_local.behaviors import _BALL_KNOBS, _ball_place, _ball_sense
+    env = _ball_env()
+    lo, hi = (_BALL_KNOBS["MICRODUCK_BALL_DIST_LO"],
+              _BALL_KNOBS["MICRODUCK_BALL_DIST_HI"])
+    for d in (lo, 0.40):
+        _ball_place(env, d, 0.0)
+        _ball_sense(env, force=True)
+        assert not env._ball_seen, f"ball at {d} m is in frame at a level gaze"
+    for d in (0.5, 1.0, hi):
+        _ball_place(env, d, 0.0)
+        _ball_sense(env, force=True)
+        assert env._ball_seen, f"ball at {d} m is out of frame at a level gaze"
+    # The nod, and the whole window under it — this is the strategy the
+    # near-floor pitch band of the coverage pay is buying.
+    env.data.qpos[env.joint_qpos_adr[6]] = C.DEFAULT_POSE[6] + 0.30
+    mujoco.mj_forward(env.model, env.data)
+    for d in (lo, 0.40, 0.5, 1.0, hi):
+        _ball_place(env, d, 0.0)
+        _ball_sense(env, force=True)
+        assert env._ball_seen, f"ball at {d} m is out of frame with the head nodded"
+    # ...and it is genuinely the VERTICAL axis doing it: pin the PORTRAIT
+    # orientation (116 up the view, the value this recipe carried until
+    # 2026-09-11) and the near end comes back into a level frame.
+    tall = _ball_env(spawn_overrides={"MICRODUCK_BALL_HFOV_DEG": "60",
+                                      "MICRODUCK_BALL_VFOV_DEG": "116"})
+    for d in (lo, 0.40):
+        _ball_place(tall, d, 0.0)
+        _ball_sense(tall, force=True)
+        assert tall._ball_seen, f"portrait: ball at {d} m should be in frame"
+
+
+def test_find_ball_bearing_signs_match_the_detector():
+    """duck_detect::Detection::bearing is -1 hard LEFT .. +1 hard RIGHT. A
+    ball 17 deg to the duck's left (+y in its yaw frame) must read negative
+    across the frame and positive in the body-bearing memory slot."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, 0.3)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and env._ball_bx < -0.3
+    assert env.head_cmd[3] == pytest.approx(0.3 / np.pi, abs=1e-3)
+    _ball_place(env, 1.0, -0.3)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and env._ball_bx > 0.3
+    assert env.head_cmd[3] == pytest.approx(-0.3 / np.pi, abs=1e-3)
+
+
+def test_find_ball_memory_fades_while_lost_and_snaps_back_when_seen():
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    # No ball events: a teleport or roll mid-test would put it back in frame.
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    _ball_place(env, 1.0, 0.3)
+    _ball_sense(env, force=True)
+    m0 = float(env.head_cmd[3])
+    assert m0 > 0.05
+    _ball_place(env, 1.0, np.pi)           # gone behind: lost
+    # Drive the sensing loop directly (the physics is frozen at the spawn
+    # pose, so this is the memory logic alone, not a toppling duck).
+    for _ in range(100):                   # 2 s of the 4 s fade
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_seen is False
+    assert env.head_cmd[2] == 0.0
+    # (the detector holds its last report for DETECT_EVERY steps, so the
+    # fade starts a step late — 1% slack covers it)
+    assert env._ball_mem_conf == pytest.approx(np.exp(-2.0 / 4.0), rel=0.01)
+    # The memory slot still points where the ball WAS (the old bearing,
+    # decayed), never the new true bearing the policy could not have seen.
+    assert float(env.head_cmd[3]) == pytest.approx(m0 * np.exp(-0.5), rel=0.01)
+    _ball_place(env, 1.0, 0.0)
+    for _ in range(3):
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_seen and env.head_cmd[2] == 1.0 and env._ball_mem_conf == 1.0
+
+
+def test_find_ball_pays_nothing_while_lost_except_new_ground():
+    """A per-step SEARCH penalty would make falling over the cheapest way
+    out of a hard search (the episode ends, the charge stops). While the
+    ball is out of frame the only income is bounded coverage pay, and a
+    gaze parked on the same cell earns none of it."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    _ball_place(env, 1.0, np.pi)
+    _ball_sense(env, force=True)
+    env._ball_mem_conf = 0.0
+    terms = {t.key: t for t in BEHAVIORS["find_ball"].terms}
+    assert terms["eyes_on_ball"].fn(env) == 0.0
+    assert terms["ball_in_view"].fn(env) == 0.0
+    assert terms["face_the_ball"].fn(env) == 0.0
+    env._ball_new_bins = 0
+    assert terms["new_ground"].fn(env) == 0.0
+    env._ball_new_bins = 1
+    assert terms["new_ground"].fn(env) == 1.0
+    assert terms["turn_to_belief"].fn(env) == 0.0      # no belief, no pay
+    assert not any(t.is_penalty and "search" in t.key for t in terms.values())
+
+
+def test_find_ball_centred_beats_edge_of_frame():
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env()
+    eyes = {t.key: t for t in BEHAVIORS["find_ball"].terms}["eyes_on_ball"].fn
+    _ball_place(env, 1.5, 0.0)
+    _ball_sense(env, force=True)
+    centre = eyes(env)
+    _ball_place(env, 1.5, 0.35)
+    _ball_sense(env, force=True)
+    assert env._ball_seen
+    assert eyes(env) < centre
+
+
+def test_find_ball_ladder_carries_no_reward_edits():
+    """Stages ladder only the WORLD (spawn window, ball events) — the sealed
+    term set is identical in every stage (AGENTS.md)."""
+    b = BEHAVIORS["find_ball"]
+    assert len(b.curriculum) == 3
+    allowed = {"MICRODUCK_BALL_BEARING_MAX", "MICRODUCK_BALL_EVENT_RATE",
+               "MICRODUCK_BALL_ROLL_PROB"}
+    for st in b.curriculum:
+        assert set(st.env) <= allowed, st.env
+    # The first rung keeps the ball in front; the last opens the whole circle.
+    assert float(b.curriculum[0].env["MICRODUCK_BALL_BEARING_MAX"]) < 1.6
+    assert float(b.curriculum[-1].env["MICRODUCK_BALL_BEARING_MAX"]) > 3.0
+
+
+def test_find_ball_spawn_window_knob_and_reports(monkeypatch):
+    monkeypatch.setenv("MICRODUCK_BALL_BEARING_MAX", "0.3")
+    monkeypatch.setenv("MICRODUCK_BALL_EVENT_RATE", "0")
+    env = _ball_env(seed=4)
+    for _ in range(20):
+        env.reset()
+        assert abs(env._ball_psi) <= 0.3 + 1e-6
+        assert env.last_spawn.startswith("ball ")
+    from microduck_local.behaviors import ball_marker_payload
+    payload = ball_marker_payload(env)
+    assert len(payload) == 4 and payload[2] == pytest.approx(0.035, abs=1e-3)
+    cap = env.behavior.caption_fn(env)
+    assert cap.startswith(("SEEN ", "LOST ")) and len(cap) <= 31
+    assert env.behavior.report_fn(env)[0].startswith("ball:")
+    markers = env.behavior.markers_fn(env)
+    assert len(markers) == 2 and markers[0][1] == pytest.approx(0.035)
+
+
+def test_find_ball_teach_card_and_matcher():
+    card = behavior_card(BEHAVIORS["find_ball"])
+    assert card["curriculum"] and card["terms"]
+    assert match_behavior("find the ball").id == "find_ball"
+    assert match_behavior("look around for the ball").id == "find_ball"
+    assert match_behavior("stand on one leg").id == "one_leg"
+
+
+def test_find_ball_belief_slot_is_seeded_and_never_goes_silent():
+    """Slot 54 starts as the daemon's prior (the ball's side, noisy, half
+    confidence) or as the sweep-left-first convention (+0.15), and while
+    the ball is lost its confidence floors at 0.15 rather than fading to
+    nothing — the cue that turns a stand-and-stare into a sweep."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env(seed=7, spawn_overrides={"MICRODUCK_BALL_PRIOR_PROB": "1",
+                                              "MICRODUCK_BALL_PRIOR_NOISE": "0",
+                                              "MICRODUCK_BALL_EVENT_RATE": "0"})
+    for _ in range(10):
+        obs, _ = env.reset()
+        if env._ball_seen:
+            continue                    # a seen ball overrides any prior
+        assert obs[54] == pytest.approx(0.5 * env._ball_psi / np.pi, abs=5e-3)
+        assert env.last_spawn.endswith("prior")
+    env = _ball_env(seed=8, spawn_overrides={"MICRODUCK_BALL_PRIOR_PROB": "0",
+                                              "MICRODUCK_BALL_EVENT_RATE": "0"})
+    for _ in range(10):
+        obs, _ = env.reset()
+        if env._ball_seen:
+            continue
+        assert obs[54] == pytest.approx(0.15, abs=1e-3)
+        assert env.last_spawn.endswith("blind")
+    # Lose it for a long time: confidence floors, the slot keeps its sign.
+    _ball_place(env, 1.0, 0.3)          # 17 deg left: inside the 24 deg half-FOV
+    _ball_sense(env, force=True)
+    assert env._ball_seen
+    _ball_place(env, 1.0, np.pi)
+    for _ in range(1000):
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_mem_conf == pytest.approx(0.15)
+    assert env.head_cmd[3] == pytest.approx(0.15 * 0.3 / np.pi, abs=2e-3)
+
+
+def test_find_ball_scan_clock_runs_while_lost_and_parks_while_seen():
+    """obs[59:61] is sin/cos of the scan phase: parked at (0, 1) while the
+    detector reports the ball, advancing at 2pi/SCAN_PERIOD from zero at
+    every loss — the phase a memoryless policy sweeps on."""
+    from microduck_local.behaviors import _ball_place, _ball_sense
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                     "MICRODUCK_BALL_SCAN_PERIOD": "2"})
+    _ball_place(env, 1.0, 0.0)
+    _ball_sense(env, force=True)
+    obs = env._get_obs()
+    assert env._ball_seen and obs[59] == 0.0 and obs[60] == 1.0
+    _ball_place(env, 1.0, np.pi)
+    for _ in range(25):                       # 0.5 s of a 2 s period = 90 deg
+        env.step_count += 1
+        _ball_sense(env)
+    obs = env._get_obs()
+    # (the held detector report delays the loss by up to DETECT_EVERY steps)
+    assert obs[59] == pytest.approx(1.0, abs=0.08) and abs(obs[60]) < 0.1
+    _ball_place(env, 1.0, 0.0)
+    for _ in range(3):
+        env.step_count += 1
+        _ball_sense(env)
+    obs = env._get_obs()
+    assert obs[59] == 0.0 and obs[60] == 1.0
+
+
+def test_find_ball_facing_slopes_all_the_way_round():
+    """The facing pay must have a gradient with the ball straight behind —
+    a Gaussian wide layer paid ~0.04 there and the export dithered around
+    "directly behind" instead of turning (see _ball_face)."""
+    env = _ball_env()
+    face = {t.key: t for t in BEHAVIORS["find_ball"].terms}["face_the_ball"].fn
+    env._ball_seen = True
+    vals = []
+    for deg in (0, 45, 90, 135, 170, 180):
+        env._ball_psi = np.radians(deg)
+        vals.append(face(env))
+    assert vals[0] == pytest.approx(1.0)
+    assert all(a > b for a, b in zip(vals, vals[1:]))   # strictly decreasing
+    assert vals[-2] - vals[-1] > 0.001                   # still sloping at 170 deg
+    assert vals[-1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_find_ball_turn_pay_is_signed_by_the_belief_and_off_while_seen():
+    env = _ball_env()
+    turn = {t.key: t for t in BEHAVIORS["find_ball"].terms}["turn_to_belief"].fn
+    env._ball_det[2] = 0.0
+    env._ball_mem, env._ball_mem_conf = 1.0, 1.0        # believed to the LEFT
+    env._gyro[2] = 1.0                                   # turning left
+    assert turn(env) == pytest.approx(0.5)
+    env._gyro[2] = -1.0                                  # turning right: charged
+    assert turn(env) == pytest.approx(-0.5)
+    env._gyro[2] = 10.0                                  # capped, no pay for violence
+    assert turn(env) == pytest.approx(1.0)
+    env._ball_mem_conf = 0.5
+    assert turn(env) == pytest.approx(0.5)
+    env._ball_det[2] = 1.0                               # seen: the facing term owns it
+    assert turn(env) == 0.0
+
+
+def _aim_head(env, nod: float) -> None:
+    """Pitch the head DOWN by `nod` rad and refresh the kinematics, so the
+    camera frame the ball is projected through is the posed one. Negative
+    neck_pitch looks down (the camera element's +z is the optical axis)."""
+    import mujoco
+
+    from microduck_local import contract as C
+
+    env.data.qpos[env.joint_qpos_adr[5]] = C.DEFAULT_POSE[5] - nod
+    mujoco.mj_forward(env.model, env.data)
+
+
+def test_find_ball_handoff_needs_half_a_second_squared_up_on_the_ball():
+    """The gate a kick policy is handed: ball centred in the DETECTOR's frame
+    and the head straight ahead (so the body is what's pointing at it), held
+    0.5 s. Both halves are detector + joint encoders — the daemon has to be
+    able to run this same test, so no privileged state may leak into it."""
+    from microduck_local.behaviors import (
+        _BALL_AIM_STEPS,
+        _BALL_HEAD_YAW_ID,
+        _ball_place,
+        _ball_sense,
+    )
+    b = BEHAVIORS["find_ball"]
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    # Straight ahead at 1.2 m, head nodded down 0.18 rad. The nod is not
+    # decoration: the camera is 25 cm up, so a floor ball at 1.2 m sits 12 deg
+    # BELOW a level gaze (by = -0.34) and does not count as centred until the
+    # duck looks down at it. Handing a kick a ball the duck is only looking
+    # over the top of is exactly the failure this gate exists to prevent.
+    _aim_head(env, nod=0.18)
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and abs(env._ball_by) < 0.25
+    assert not b.handoff_fn(env)          # one aimed instant is not a handoff
+    # Fires exactly at the threshold, not before. Driven off the streak rather
+    # than a step count because the reset's own sample counts when the episode
+    # happens to spawn already aimed.
+    while env._ball_aim_steps < _BALL_AIM_STEPS - 1:
+        env.step_count += 1
+        _ball_sense(env)
+    assert not b.handoff_fn(env), "handed off before the half second"
+    env.step_count += 1
+    _ball_sense(env)
+    assert env._ball_aim_steps == _BALL_AIM_STEPS and b.handoff_fn(env)
+    # Turning the head to hold the ball means the BODY is not square: the
+    # streak breaks even though the ball is still dead centre in frame.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.8
+    env.step_count += 1
+    _ball_sense(env)
+    assert env._ball_aim_steps == 0 and not b.handoff_fn(env)
+
+
+def test_find_ball_handoff_breaks_when_the_ball_leaves_the_frame():
+    from microduck_local.behaviors import _BALL_AIM_STEPS, _ball_place, _ball_sense
+    b = BEHAVIORS["find_ball"]
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0"})
+    _aim_head(env, nod=0.18)
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    for _ in range(_BALL_AIM_STEPS + 5):
+        env.step_count += 1
+        _ball_sense(env)
+    assert b.handoff_fn(env)
+    _ball_place(env, 1.2, np.pi)          # gone: the streak resets, not decays
+    for _ in range(4):                     # past the held detector report
+        env.step_count += 1
+        _ball_sense(env)
+    assert env._ball_aim_steps == 0 and not b.handoff_fn(env)
+
+
+def test_find_ball_hands_off_to_a_kick_and_keeps_its_heading():
+    """It aims a ball-BLIND kick, so the handoff target is the kick — and the
+    turn it just made toward the ball is the deliverable, which is why the
+    lab's post-handoff yaw recentring is off for this recipe."""
+    b = BEHAVIORS["find_ball"]
+    assert b.handoff_policy == "pollen:ball_kick_right"
+    assert b.handoff_recenter is False
+    # The flip family keeps the default: its handoff IS a landing, and the
+    # heading a landing imparts is drift, not a choice.
+    for bid in ("backflip", "airflip"):
+        assert BEHAVIORS[bid].handoff_fn is None
+        assert BEHAVIORS[bid].handoff_recenter is True
+
+
+def test_find_ball_body_aimed_pays_the_body_not_the_neck():
+    """`body_aimed` exists because `face_the_ball` did not buy the turn: the
+    shipped export held the ball dead centre using ~21 deg of head yaw and
+    left the body 18-20 deg off. So the term must be worth nothing to a duck
+    that centres the ball by craning its neck, and near its maximum only when
+    the head is straight — which is what makes the body the thing aiming."""
+    from microduck_local.behaviors import (
+        _BALL_HEAD_YAW_ID,
+        _ball_body_aimed,
+        _ball_place,
+        _ball_sense,
+    )
+
+    env = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    for _ in range(20):    # settle the drop-in: at the spawn pose the head is
+        env.step(np.zeros(14, np.float32))   # still high and a floor ball sits
+    _ball_place(env, 1.2, 0.0)               # low in the frame (by = -0.39)
+    _ball_sense(env, force=True)
+    assert env._ball_seen and abs(env._ball_bx) < 0.25
+
+    # ~0.70: a floor ball at 1.2 m sits ~4 deg BELOW a level gaze (the camera
+    # is above it), which is geometry, not bad aiming — the tight layer is
+    # 7 deg, so a perfectly squared-up duck still scores a little under 1.
+    straight = _ball_body_aimed(env)
+    assert straight > 0.65, straight
+
+    # Same centred detector report, head cranked to where the export sat
+    # (21 deg = 0.37 rad): the pay has to collapse, or it is another term
+    # that a neck can farm.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.37
+    craned = _ball_body_aimed(env)
+    assert craned < 0.5 * straight, (craned, straight)
+    # ...and it still SLOPES there, or there is no gradient home from 21 deg.
+    env.data.qpos[env.joint_qpos_adr[_BALL_HEAD_YAW_ID]] = 0.30
+    assert craned < _ball_body_aimed(env) < straight
+
+    # Nothing is paid while the ball is not in frame: this term is about the
+    # aimed state, and `new_ground` / `turn_to_belief` own the search.
+    _ball_place(env, 1.2, np.pi)
+    _ball_sense(env, force=True)
+    assert not env._ball_seen and _ball_body_aimed(env) == 0.0
+
+
+def test_wide_upright_slopes_where_the_narrow_one_is_flat():
+    """`_upright`'s single Gaussian is worth ~0.007 at 30 deg of tilt and
+    ~0.0002 at 41 — past ~25 deg it prices being upright but not RECOVERING,
+    so a committed lean is free and the duck rides it to the floor. The wide
+    two-layer version has to still SLOPE out there, which is the whole point;
+    a term that is merely nonzero would not pull anything back."""
+    import math
+
+    from microduck_local.behaviors import _upright, _upright_wide
+
+    env = _ball_env()
+
+    def at(tilt_deg):
+        """Roll the trunk to a known tilt and read both terms."""
+        import mujoco
+        half = math.radians(tilt_deg) / 2
+        env.data.qpos[3:7] = [math.cos(half), math.sin(half), 0.0, 0.0]
+        mujoco.mj_forward(env.model, env.data)
+        return _upright(env), _upright_wide(env)
+
+    # Upright: both peak, and the wide one must not inflate the ceiling.
+    n0, w0 = at(0.0)
+    assert n0 == pytest.approx(1.0, abs=1e-6)
+    assert w0 == pytest.approx(1.0, abs=1e-6)
+
+    # The dead zone the falls live in: narrow has collapsed, wide has not.
+    n30, w30 = at(30.0)
+    assert n30 < 0.02 and w30 > 0.25, (n30, w30)
+    n41, w41 = at(41.0)
+    assert n41 < 0.01 and w41 > 0.15, (n41, w41)
+
+    # ...and it SLOPES there — recovering from 41 to 30 deg has to pay, or it
+    # is a floor, not a gradient. The narrow term's own slope is ~zero.
+    assert w30 - w41 > 0.05
+    assert n30 - n41 < 0.02
+
+    # Monotone: leaning further is never worth more.
+    vals = [at(t)[1] for t in (0, 10, 20, 30, 45, 60, 90)]
+    assert all(a > b for a, b in zip(vals, vals[1:])), vals
+
+
+def test_no_recipe_has_adopted_the_wide_upright():
+    """`_upright` is shared — it is a catalog term, it gates one_leg's hold,
+    and it SCALES backflip's brake penalty and two of imitate's terms, so the
+    wide shape is opt-in and NOTHING opts in today: A/B'd on find_ball, it was
+    Pareto-dominated (docs/roadmap.md). Kept because the shape and its measured
+    failure are worth more than the two lines they cost, and because the next
+    person to have this idea should find the result before the experiment.
+
+    If a recipe ever adopts it, this test is the reminder that it re-prices a
+    term four other behaviors read."""
+    from microduck_local import behaviors as live
+    from microduck_local.behaviors import _upright, _upright_wide
+
+    # Read the registry THROUGH the module: `reload_library()` (every /teach
+    # calls it) rebinds core.BEHAVIORS to a fresh dict, so a module-level
+    # `from ... import BEHAVIORS` in this file goes stale the moment a lab
+    # test has run first — and then every `t.fn is _upright` here compares a
+    # new function against the old registry's objects and finds nothing.
+    wide = {bid for bid, b in live.BEHAVIORS.items()
+            for t in b.terms if t.fn is _upright_wide}
+    assert wide == set(), wide
+    # ...and the recipes that name the term all still use the narrow one.
+    narrow = {bid for bid, b in live.BEHAVIORS.items()
+              for t in b.terms if t.fn is _upright}
+    assert "find_ball" in narrow, narrow
+
+
+def test_lean_spawn_is_tipped_but_recoverable():
+    """The lean spawn exists to put the duck in states it otherwise only ever
+    visits on its way to the floor. Two ways that goes quietly wrong, both of
+    which this repo has hit before: the spawn lands past the fall threshold and
+    every episode is a zero-length no-op, or a foot is wedged in the floor and
+    the solver ejects it (the backflip "invisible wall"), spending the state on
+    a launch nobody asked for."""
+    import math
+
+    import numpy as np
+
+    env = _ball_env(spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "1.0"})
+    tilts = []
+    for ep in range(12):
+        env.reset(seed=500 + ep)
+        g = env._projected_gravity()
+        tilts.append(math.degrees(math.acos(max(-1.0, min(1.0, -float(g[2]))))))
+        # Recoverable, not pre-lost: nothing terminates on the first step.
+        _, _, term, _, _ = env.step(np.zeros(14, np.float32))
+        assert not term, f"lean spawn terminated immediately at {tilts[-1]:.0f} deg"
+        # ...and it is standing on the floor, not wedged in it or dropped from
+        # a height (the attitude-aware clearance).
+        assert 0.10 < float(env._trunk_xpos[2]) < 0.22
+
+    assert 20.0 <= min(tilts) and max(tilts) <= 40.0, (min(tilts), max(tilts))
+    # Tipping BOTH ways across episodes — recovery must not be a one-sided
+    # trick, and a fixed axis would let the policy memorise one save.
+    env2 = _ball_env(spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "1.0"})
+    rolls = []
+    for ep in range(12):
+        env2.reset(seed=700 + ep)
+        rolls.append(float(env2._projected_gravity()[1]))
+    assert min(rolls) < -0.05 and max(rolls) > 0.05, rolls
+
+
+def test_lean_spawn_is_a_quarter_of_training_and_none_of_the_battery():
+    """The recipe trains with 25% leaning starts — that is what buys the kick
+    handoff (92% vs 85%) and cuts the falls to a third. But `eval-find-ball`
+    must NOT fire them: its job is a comparable measurement, and every number
+    in docs/roadmap.md and the policy READMEs was taken on plain standing
+    starts. A family firing inside the battery would change the test without
+    saying so, which is the same trap as measuring `centred` in normalized
+    bearing across two cameras."""
+    from microduck_local import behaviors as live  # see wide_upright above
+    from microduck_local.behaviors import _ball_spawn_leaning
+    from microduck_local.eval_find_ball import run_battery
+    fams = live.BEHAVIORS["find_ball"].spawn_families
+    assert [fn for _, fn in fams] == [_ball_spawn_leaning]
+    assert [p for p, _ in fams] == [0.25], fams
+
+    # Training env: leaning starts really do fire.
+    env = _ball_env()
+    tilted = 0
+    for ep in range(60):
+        env.reset(seed=900 + ep)
+        tilted += abs(float(env._projected_gravity()[2])) < 0.98
+    assert 5 <= tilted <= 30, tilted
+
+    # Battery env: they do not, without being asked.
+    res = run_battery("policies/find_ball/policy.onnx", episodes=2, seconds=0.2,
+                      seed=3)
+    assert res["rows"], res
+    from microduck_local.behaviors import BehaviorEnv
+    probe = BehaviorEnv("find_ball", obs_noise=False, domain_rand=False,
+                        action_delay=False, random_yaw=False, seed=3,
+                        spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                         "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0"})
+    for ep in range(20):
+        probe.reset(seed=900 + ep)
+        assert abs(float(probe._projected_gravity()[2])) > 0.98, "battery spawned tilted"
+
+
+def test_stale_fix_carries_the_held_bearing_without_compounding_it():
+    """find_ball had the same stale-pose bug tidy's `_locate` did: a bearing
+    measured off the camera at capture, held while the head kept sweeping, so
+    the policy acted on a pose the duck had already left. Compensating removes
+    the detector-rate cliff outright (4 Hz kick handoff 2% -> 80%, falls
+    16 -> 4 per 60).
+
+    The trap locked here is the one that briefly hid that result: the
+    correction must be computed from the CAPTURED bearing, never from `det`
+    itself. `det` is mutated in place, so re-adding the whole
+    rotation-since-capture compounds it — about 2.5x over-correction at 10 Hz
+    and worse below, which reads convincingly as "compensation does not
+    work"."""
+
+    import math
+
+    import mujoco
+
+    from microduck_local.behaviors import _ball_place, _ball_sense
+
+    def bearing_after_head_turn(stale_fix):
+        env = _ball_env(spawn_overrides={
+            "MICRODUCK_BALL_EVENT_RATE": "0",
+            "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0",
+            "MICRODUCK_BALL_DETECT_EVERY": "10",
+            "MICRODUCK_BALL_STALE_FIX": stale_fix})
+        for _ in range(20):
+            env.step(np.zeros(14, np.float32))
+        _ball_place(env, 1.2, 0.0)
+        _ball_sense(env, force=True)          # capture, head straight
+        captured = float(env.head_cmd[0])
+        # Turn the head WITHOUT letting the detector re-report.
+        env.data.qpos[env.joint_qpos_adr[7]] = 0.30
+        mujoco.mj_forward(env.model, env.data)
+        env.step_count += 1
+        _ball_sense(env)
+        return captured, float(env.head_cmd[0])
+
+    held_from, held_to = bearing_after_head_turn("0")
+    assert held_to == pytest.approx(held_from, abs=1e-6), "report was not held"
+
+    fixed_from, fixed_to = bearing_after_head_turn("1")
+    assert fixed_from == pytest.approx(held_from, abs=1e-6)
+    # +1/half_h per rad of camera yaw, MEASURED — so the slot moves by the
+    # turn DIVIDED BY the half-HFOV and rescales with the lens: the same
+    # 0.30 rad of head yaw reads +0.57 through a 60 deg-wide frame (the
+    # portrait mount this recipe assumed until 2026-09-11) and +0.30 through
+    # the 116 deg-wide one the robot has. Written against the knob, so a
+    # remount moves the expectation rather than breaking the test — and
+    # tightly, because the failure this guards (compounding) OVERSHOOTS.
+    from microduck_local.behaviors import _BALL_KNOBS
+    half_h = math.radians(_BALL_KNOBS["MICRODUCK_BALL_HFOV_DEG"]) / 2
+    assert fixed_to == pytest.approx(fixed_from + 0.30 / half_h, abs=0.05), (fixed_from, fixed_to)
+
+    # On in the shipped recipe: ~2 points of handoff at the nominal 25 Hz,
+    # and it buys the entire cliff below it.
+    assert _BALL_KNOBS["MICRODUCK_BALL_STALE_FIX"] == 1.0
+
+    # THE COMPOUNDING GUARD. Hold one report while the head turns steadily and
+    # the correction must track the TOTAL rotation since capture, growing
+    # linearly. A version that sums its own output accelerates instead.
+    env = _ball_env(spawn_overrides={"MICRODUCK_BALL_EVENT_RATE": "0",
+                                     "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0",
+                                     "MICRODUCK_BALL_DETECT_EVERY": "50",
+                                     "MICRODUCK_BALL_STALE_FIX": "1"})
+    for _ in range(20):
+        env.step(np.zeros(14, np.float32))
+    _ball_place(env, 1.2, 0.0)
+    _ball_sense(env, force=True)
+    base = float(env.head_cmd[0])
+    seen = []
+    for i in range(1, 5):
+        env.data.qpos[env.joint_qpos_adr[7]] = 0.05 * i
+        mujoco.mj_forward(env.model, env.data)
+        env.step_count += 1
+        _ball_sense(env)
+        seen.append(float(env.head_cmd[0]) - base)
+    steps = [b - a for a, b in zip(seen, seen[1:])]
+    assert min(steps) > 0.0 and max(steps) < 1.6 * min(steps), (
+        f"correction is compounding, not tracking total rotation: {seen}")
+
+# ---------------------------------------------------------------------------
+# deep_squat — the recipe that lives UNDER the walk env's fall line, and the
+# per-recipe height_termination knob that makes it learnable.
+
+def _quiet_env(behavior_id, **kw):
+    from microduck_local.behaviors import BehaviorEnv
+    env = BehaviorEnv(behavior_id, obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0, **kw)
+    env.reset()
+    return env
+
+
+def _fold_until_fall_line(env, max_steps=60):
+    """Drop into a level, symmetric squat (1.4 rad of knee, the hip eased
+    0.2 rad, the ankle closing the chain so the feet stay flat) over five
+    control steps and return (step, terminated, gz) at the first step the
+    trunk is under FALL_HEIGHT. Measured on the no-randomizer env: crosses at
+    step 10 with projected-gravity z ~ -0.81, far from the tilt rule's
+    -0.342, so the only rule that can fire at the crossing is the height one.
+    (The ground spawn's tipped fold does NOT work here: it topples as it
+    sinks and the tilt rule fires on the crossing step in every env.)"""
+    from microduck_local import contract as C
+    dp = np.asarray(C.DEFAULT_POSE, dtype=np.float64)
+    q = dp.copy()
+    # knee, hip, then the ankle closing the chain — left and right mirrored.
+    q[3], q[2] = dp[3] + 1.4, dp[2] + 0.2
+    q[4] = -(q[2] + q[3])
+    q[12], q[11] = dp[12] - 1.4, dp[11] - 0.2
+    q[13] = -(q[11] + q[12])
+    full = (q - dp).astype(np.float32)
+    for i in range(max_steps):
+        _, _, terminated, _, _ = env.step(full * min(1.0, (i + 1) / 5))
+        if float(env._trunk_xpos[2]) < env.FALL_HEIGHT:
+            return i, bool(terminated), float(env._projected_gravity()[2])
+        if terminated:
+            break
+    raise AssertionError("the squat never took the trunk under FALL_HEIGHT")
+
+
+def test_height_termination_is_a_recipe_knob():
+    """Behavior.height_termination reaches the env the way terminate_on_fall
+    does: locomotion turns it off (GPU parity), the deep squat turns it off
+    (its target is under the line), standing tricks keep it, and an explicit
+    env kwarg still wins. The lab preview mirrors it like terminate_on_fall."""
+    from microduck_local import viz_server as V
+    from microduck_local.behaviors import BEHAVIORS, Behavior
+    assert Behavior.__dataclass_fields__["height_termination"].default is True
+    assert BEHAVIORS["run"].height_termination is False
+    assert BEHAVIORS["deep_squat"].height_termination is False
+    assert BEHAVIORS["crouch"].height_termination is True
+    for bid, expect in (("deep_squat", False), ("crouch", True)):
+        env = _quiet_env(bid)
+        assert env.height_termination is expect, bid
+        env.close()
+    env = _quiet_env("crouch", height_termination=False)
+    assert env.height_termination is False
+    env.close()
+    assert V.env_kwargs_for_behavior(BEHAVIORS["deep_squat"])["height_termination"] is False
+    assert "height_termination" not in V.env_kwargs_for_behavior(BEHAVIORS["crouch"])
+
+
+def test_deep_squat_target_is_under_the_fall_line_and_distinct_from_crouch():
+    """Why the knob exists: the target sits under FALL_HEIGHT (a z-kill recipe
+    could never reach it), and the height term separates the squat from
+    crouch's depth by ~2x. The first draft's target was 3 mm from crouch's and
+    paid within 1% at both depths."""
+    from microduck_local.behaviors import _squat_target_z, _squat_z
+    env = _quiet_env("deep_squat")
+    target = _squat_target_z(env)
+    assert target < env.FALL_HEIGHT
+    assert target < env.stand_z - 0.035          # deeper than crouch
+    pays = {}
+    for name, z in (("stand", env.stand_z), ("crouch", env.stand_z - 0.035),
+                    ("fall_line", env.FALL_HEIGHT), ("target", target)):
+        env._trunk_xpos[2] = z
+        pays[name] = _squat_z(env)
+    env.close()
+    assert pays["target"] == pytest.approx(1.0)
+    assert pays["crouch"] < 0.6 * pays["target"]
+    assert 0.1 < pays["stand"] < pays["crouch"]
+    assert pays["fall_line"] > pays["crouch"]     # the slope keeps pointing down
+
+
+def test_deep_squat_env_keeps_running_under_the_fall_line():
+    """Same fold, two envs: crouch's env (z-kill on) ends the episode the step
+    the trunk crosses FALL_HEIGHT; the deep squat's env does not, so its goal
+    state can be sampled at all."""
+    crouch = _quiet_env("crouch")
+    step_c, ended_c, gz_c = _fold_until_fall_line(crouch)
+    crouch.close()
+    squat = _quiet_env("deep_squat")
+    step_s, ended_s, gz_s = _fold_until_fall_line(squat)
+    squat.close()
+    assert (step_c, gz_c) == (step_s, gz_s)       # identical physics up to the crossing
+    assert gz_c < -0.6                            # upright: the tilt rule is nowhere near
+    assert ended_c is True
+    assert ended_s is False
+
+
+def test_deep_squat_recipe_contract():
+    from microduck_local.behaviors import match_behavior
+    b = match_behavior("deep squat")
+    assert b.id == "deep_squat"
+    assert match_behavior("深蹲").id == "deep_squat"
+    # crouch keeps the bare words it owns; only the longer phrase reaches the squat
+    assert match_behavior("crouch down").id == "crouch"
+    assert match_behavior("squat").id == "crouch"
+    assert round(b.episode_s * 50) == 600
+    env = _quiet_env("deep_squat")
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        _, reward, terminated, truncated, _ = env.step(
+            rng.uniform(-0.3, 0.3, env.action_space.shape).astype(np.float32))
+        assert np.isfinite(reward)
+        for t in b.terms:
+            if t.is_penalty:
+                assert t.fn(env) <= 0.0, t.key
+        if terminated or truncated:
+            break
+    env.close()
+
+
+# --------------------------------------------------------------- the get-up
+# (roadmap B.1 / bead mdl-0ad, 2026-09-08)
+
+def test_getup_ladder_carries_no_reward_edits():
+    """Same contract as the headstand's ladder (AGENTS.md): a stage may
+    ladder PHYSICS, SPAWNS and STRICTNESS, never the pay. What moves down
+    the getup ladder is the tilt window (how far from upright it wakes up),
+    the actuator model, and which falls are in the mix — nothing else."""
+    b = BEHAVIORS["getup"]
+    assert len(b.curriculum) >= 4
+    ALLOWED = {"MICRODUCK_ACTUATOR", "MICRODUCK_BAM_CURRENT_SCALE",
+               "MICRODUCK_GETUP_TILT_LO", "MICRODUCK_GETUP_TILT_HI",
+               "MICRODUCK_SPAWN_FAMILY_PROBS", "MICRODUCK_EPISODE_S",
+               "MICRODUCK_GETUP_SETTLE_S"}
+    for st in b.curriculum:
+        assert set(st.env) <= ALLOWED, f"stage '{st.label}' smuggles a knob"
+    # The ladder only ever gets HARDER: the tilt window never walks back up
+    # toward upright, or a later rung would be rehearsing an earlier one.
+    los = [float(st.env["MICRODUCK_GETUP_TILT_LO"]) for st in b.curriculum]
+    his = [float(st.env["MICRODUCK_GETUP_TILT_HI"]) for st in b.curriculum]
+    assert los == sorted(los) and his == sorted(his), (los, his)
+    # Settle ladders WITH tilt, and must: a duck posed at a 30 deg lean and
+    # then settled for a second is flat on the floor, so a ladder that tilts
+    # without settling has five copies of its last rung. The first rung is a
+    # mid-topple CATCH (settle 0); the last starts from a duck that has
+    # finished falling.
+    settles = [float(st.env["MICRODUCK_GETUP_SETTLE_S"]) for st in b.curriculum]
+    assert settles == sorted(settles), settles
+    assert settles[0] == 0.0 and settles[-1] >= 1.0
+    # Strong servos first (BAM from scratch never ignites — the headstand
+    # proved that five ways), honest servos last, and the last rung must be
+    # properly flat on the floor or the skill was never trained.
+    assert b.curriculum[0].env["MICRODUCK_ACTUATOR"] == "xml"
+    assert b.curriculum[-1].env["MICRODUCK_ACTUATOR"] == "bam"
+    assert "MICRODUCK_BAM_CURRENT_SCALE" not in b.curriculum[-1].env
+    assert float(b.curriculum[-1].env["MICRODUCK_GETUP_TILT_LO"]) >= 80.0
+    # All three ways of falling by the end, and a slice of standing starts so
+    # the policy is also asked to leave a stand alone.
+    probs = [float(x) for x in
+             b.curriculum[-1].env["MICRODUCK_SPAWN_FAMILY_PROBS"].split(",")]
+    assert len(probs) == 3 and all(p > 0.0 for p in probs)
+    assert 0.0 < 1.0 - sum(probs) <= 0.20
+    # The discovery-tax lesson (headstand 4d93a6: smoothness charged -1.9/step
+    # against a +1.3 salary). A get-up is a violent move; taxing the throw
+    # during discovery is the attempt tax AGENTS.md warns about.
+    keys = {t.key for t in b.terms}
+    assert "getup_hold" in keys and "still_on_the_floor" in keys
+    for tax in ("smooth_moves", "gentle_joints", "save_energy"):
+        assert tax not in keys
+
+
+def test_getup_hold_needs_all_four_gates():
+    """The salary is gated on both feet down, NOTHING else down, upright and
+    tall. The third gate is the one this recipe learned the hard way: its
+    first run (getup-probe-s3) parked in a tripod — both feet planted, jaw on
+    the floor, trunk at 0.105 of 0.120 — and collected on three of four."""
+    from microduck_local.behaviors.getup import (
+        STAND_GZ,
+        _getup_hold_raw,
+        _getup_prop_pen,
+        _getup_props_down,
+    )
+    env = _quiet_env("getup", standing_spawns=True)
+    # The STAND keyframe spawns a few mm clear of the floor (walk_env adds
+    # up to 1 cm of z noise), so the feet are not in contact until the duck
+    # has settled onto them — assert on the settled state, not on frame 0.
+    for _ in range(12):
+        env.step(np.zeros(14, np.float32))
+    # A real stand: feet down, nothing else down, upright, tall.
+    assert env.foot_contact_state == {"left": True, "right": True}
+    assert _getup_props_down(env) == 0
+    assert _getup_hold_raw(env) > 0.5
+    assert _getup_prop_pen(env) == 0.0
+    # Now fold the jaw onto the floor without leaving the feet: the tripod.
+    # Reached by hand rather than by hoping a rollout finds it — the pose is
+    # the whole point of the gate.
+    import mujoco
+    env.data.qpos[2] -= 0.035
+    env.data.qpos[env.joint_qpos_adr[5]] += 1.0     # neck down
+    env.data.qpos[env.joint_qpos_adr[6]] += 1.0     # head down
+    mujoco.mj_forward(env.model, env.data)
+    env._step_cache.clear()
+    props = _getup_props_down(env)
+    assert props > 0, "the folded pose is supposed to put something on the floor"
+    assert _getup_hold_raw(env) == 0.0, "a duck propped on its face is not standing"
+    assert _getup_prop_pen(env) < 0.0
+    assert _getup_prop_pen(env) >= -1.0, "the rent must stay bounded"
+    # And the upright gate is the recipe's constant, not a magic number here.
+    assert -1.0 < STAND_GZ < -0.5
+    env.close()
+
+
+@pytest.mark.parametrize("pose,axis,sign", [("back", 0, -1.0), ("front", 0, +1.0)])
+def test_getup_spawns_land_the_duck_on_the_floor(pose, axis, sign):
+    """Each spawn family really lies the duck down, the way the obs can see:
+    on its back gravity reads (-1, 0, 0) in the trunk frame, on its front
+    (+1, 0, 0). Nothing about a fall is hidden, which is why one policy can
+    serve all three."""
+    from microduck_local.behaviors.getup import _getup_hold_raw, _getup_props_down
+    probs = {"back": "1,0,0", "front": "0,1,0", "side": "0,0,1"}[pose]
+    env = _quiet_env("getup", spawn_overrides={
+        "MICRODUCK_SPAWN_FAMILY_PROBS": probs,
+        "MICRODUCK_GETUP_TILT_LO": "85", "MICRODUCK_GETUP_TILT_HI": "95"})
+    env.reset(seed=4)
+    assert env.last_spawn == pose
+    for _ in range(5):          # settle onto the floor (the spawn places it 3 mm clear)
+        env.step(np.zeros(14, np.float32))
+    g = env._projected_gravity()
+    assert sign * float(g[axis]) > 0.8, f"{pose}: gravity {g}"
+    # It is DOWN: on the floor, not standing, and paying rent for it.
+    assert _getup_props_down(env) > 0
+    assert _getup_hold_raw(env) == 0.0
+    env.close()
+
+
+def test_getup_shepherds_pay_progress_not_state():
+    """Anti-parking: symmetric potential shaping means a duck that lies still
+    earns nothing from the two shepherds, and a spawn banks nothing either
+    (the baselines anchor to the first post-spawn state). The headstand paid
+    three graduates in a row to park before this shape replaced the
+    annuities."""
+    env = _quiet_env("getup", spawn_overrides={
+        "MICRODUCK_SPAWN_FAMILY_PROBS": "1,0,0",
+        "MICRODUCK_GETUP_TILT_LO": "85", "MICRODUCK_GETUP_TILT_HI": "95"})
+    env.reset(seed=1)
+    for _ in range(30):
+        env.step(np.zeros(14, np.float32))   # limp: lie there
+    sums = env.reward_sums
+    shepherds = ("rise_gain", "lift_gain")
+    missing = [k for k in shepherds if k not in sums]
+    assert not missing, f"shepherd terms renamed or dropped: {missing}"
+    # Weight 30 each: a per-step annuity for merely lying at the spawn
+    # potential would be worth hundreds over 30 steps. Telescoping shaping
+    # pays only what the pose actually moved.
+    assert sum(sums[k] for k in shepherds) < 8.0
+    env.close()

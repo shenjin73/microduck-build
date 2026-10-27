@@ -464,15 +464,25 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--checkpoint-every", type=int, default=0, metavar="STEPS",
                     help="keep a numbered checkpoint this often so `select-run` can "
                          "score the whole run on ACHIEVED GROUND SPEED afterwards. "
-                         "0 (default) = off, and live.onnx/model.zip keep being "
-                         "overwritten as before")
+                         "0 (default) = use the behavior's setting, normally off; "
+                         "live.onnx/model.zip keep being overwritten as before")
     return ap
+
+
+def _distill_requested(behavior, args) -> bool:
+    return bool((args.distill or behavior.distill_walker) and not args.init_from)
+
+
+def _checkpoint_interval(behavior, args) -> int:
+    return int(args.checkpoint_every or behavior.checkpoint_every)
 
 
 def main() -> None:
     args = build_parser().parse_args()
 
     b = BEHAVIORS[args.behavior]
+    checkpoint_every = _checkpoint_interval(b, args)
+    distill = _distill_requested(b, args) and bool(b.forward_cmd)
     # Resolved BEFORE anything is written or built: behavior.json, the warm-start
     # path and the fresh-model path must all agree on one number.
     symmetry_coef = symmetry_coef_for(b, args.symmetry_coef)
@@ -484,6 +494,14 @@ def main() -> None:
     run_name = args.run_name or time.strftime(f"{b.id}-%Y%m%d-%H%M%S")
     out = RUNS_DIR / run_name
     out.mkdir(parents=True, exist_ok=True)
+    # A PREVIOUS run in this directory may have been killed between a
+    # snapshot's temp write and its os.replace. The lab clears those when it
+    # sees the trainer exit, but a CLI run has no lab watching it and a
+    # resumed directory would carry the stale temp forward — so start clean.
+    # (Nothing is writing here yet: this is before the callback exists.)
+    from .run_record import sweep_snapshot_tmps
+    for _stale in sweep_snapshot_tmps(out):
+        print(f"cleared stale {_stale} from a previous interrupted run")
     # Weights go in behavior.json so a restarted/inspected run can't silently
     # train under a different scorecard than the one on record.
     # The clip too: an imitation run is about ONE authored motion, and the
@@ -503,7 +521,8 @@ def main() -> None:
               "symmetry_coef": symmetry_coef, "desired_kl": args.desired_kl,
               "net_arch": args.net_arch, "shared_trunk": args.shared_trunk,
               "n_epochs": args.n_epochs,
-              "clip": resolve_clip_name(b)}
+              "clip": resolve_clip_name(b), "distill": distill,
+              "checkpoint_every": checkpoint_every}
     for key, value in (("title", args.title), ("description", args.description),
                        ("group", args.group)):
         chosen = value if value is not None else prior.get(key)
@@ -511,6 +530,18 @@ def main() -> None:
             record[key] = chosen.strip()
     if args.init_from:
         record["init_from"] = str(args.init_from)
+    # The knobs a stage trains behind arrive as process ENVIRONMENT, and until
+    # 2026-10-04 none was written down: ~130 MICRODUCK_* vars reach the
+    # behaviour envs (spawn families, the actuator, a ball's FOV, every drill
+    # rung) and `behavior.json` recorded none of them, so no consumer could ask
+    # the run what it trained behind even in principle. The task path has had
+    # this since `Body.train_env_kwargs`; this is the duck path catching up.
+    # A RECORD, not a replay spec: a drill crutch must still come OFF for the
+    # honest measurement, which is why nothing reads these back automatically.
+    knobs = {k: v for k, v in sorted(os.environ.items())
+             if k.startswith("MICRODUCK_") and not k.endswith("_DIR")}
+    if knobs:
+        record["env"] = knobs
     if not record.get("title"):
         print(f"{run_name}: no --title — a run with no name but its own is a "
               "run nobody can read a day later (AGENTS.md, 'Every run is a record')")
@@ -553,7 +584,7 @@ def main() -> None:
     # walked into once (four runs hung at 0% CPU with only behavior.json
     # written). The workers are already alive and blocked on their
     # semaphores while this runs, so it costs wall time, not correctness.
-    if args.distill and not args.init_from:
+    if _distill_requested(b, args):
         if not b.forward_cmd:
             print(f"{b.id}: not a locomotion recipe — --distill ignored "
                   "(a cloned walker is the wrong prior for a trick)")
@@ -722,7 +753,7 @@ def main() -> None:
               f"warmup {plateau.min_steps} steps")
     cb = ProgressCallback(out, venv, steps, snap_steps=args.snap_steps,
                           start_steps=start, plateau=plateau,
-                          checkpoint_every=args.checkpoint_every)
+                          checkpoint_every=checkpoint_every)
     # SB3 treats total_timesteps as ADDITIONAL steps when reset_num_timesteps
     # is False (_setup_learn adds num_timesteps back in), so subtract to keep
     # --steps an absolute target across warm restarts. Pinned by

@@ -28,5 +28,7 @@ def test_suggestions_are_scoped_to_the_robot():
     assert sorted(s["text"] for s in duck) == sorted([
         "stand still", "stand on one leg", "hop forward on one leg",
         "alternate feet and hop forward", "hop forward with both feet",
-        "crouch down", "spin in place", "do a headstand"])
+        "crouch stand then walk straight", "crouch stand and walk in a loop",
+        "walk straight without turning", "crouch down", "spin in place",
+        "do a headstand"])
     assert teach_suggestions("no-such-robot") == []

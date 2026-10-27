@@ -98,7 +98,309 @@ def test_matcher():
     assert match_behavior("do a jump backflip").id == "airflip"
     assert match_behavior("flip in the air").id == "airflip"
     assert match_behavior("do a back flip").id == "backflip"
+    assert match_behavior("crouch stand and walk in a loop").id == "crouch_walk_cycle"
+    assert match_behavior("下蹲走路循环").id == "crouch_walk_cycle"
+    assert match_behavior("crouch stand then walk straight").id == "crouch_stand_cycle"
+    assert match_behavior("crouch and stand in a loop").id == "crouch_stand_cycle"
+    assert match_behavior("下蹲站立循环").id == "crouch_stand_cycle"
+    assert match_behavior("walk straight without turning").id == "straight_walk"
     assert match_behavior("wave hello") is None
+
+
+def test_straight_walk_commander_and_training_defaults(monkeypatch):
+    import microduck_local.behaviors.routines as routines
+
+    behavior = BEHAVIORS["straight_walk"]
+    assert behavior.symmetric
+    assert behavior.distill_walker
+    assert behavior.checkpoint_every == 100_000
+    env = BehaviorEnv("straight_walk", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    env.home_yaw = 0.0
+    monkeypatch.setattr(routines, "_trunk_yaw", lambda _env: 0.2)
+    obs = env._get_obs()
+    assert obs.shape == (61,)
+    assert obs[48] == pytest.approx(0.4)
+    assert obs[49] == pytest.approx(0.0)
+    assert obs[50] == pytest.approx(-0.8)
+
+
+def test_crouch_stand_cycle_walks_only_between_standing_pauses():
+    from microduck_local.behaviors import (
+        _squat_cycle_caption,
+        _squat_cycle_crouch_height,
+        _squat_cycle_keep_pace,
+        _squat_cycle_stage,
+        _squat_cycle_stand_pose,
+        _squat_cycle_stand_still,
+        _squat_cycle_stand_tall,
+        _squat_cycle_static_feet,
+        _squat_z,
+    )
+
+    behavior = BEHAVIORS["crouch_stand_cycle"]
+    assert not behavior.symmetric
+    assert not behavior.height_termination
+    assert behavior.forward_cmd == 0.4
+    assert behavior.distill_walker
+    assert behavior.checkpoint_every == 150_000
+    assert behavior.episode_s == 28.0
+    env = BehaviorEnv("crouch_stand_cycle", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == (61,)
+    first_obs = obs.copy()
+    schedule = (
+        (0, "crouch", 0.0), (249, "crouch", 0.0),
+        (250, "stand", 0.0), (349, "stand", 0.0),
+        (350, "walk", 0.4), (599, "walk", 0.4),
+        (600, "stand", 0.0), (699, "stand", 0.0),
+        (700, "crouch", 0.0),
+    )
+    for step, stage, speed in schedule:
+        env.step_count = step
+        obs = env._get_obs()
+        assert _squat_cycle_stage(env) == stage
+        assert obs[48] == pytest.approx(speed)
+        np.testing.assert_allclose(obs[49:51], np.zeros(2), atol=1e-6)
+        if step == 0:
+            assert _squat_cycle_crouch_height(env) == pytest.approx(_squat_z(env))
+            assert _squat_cycle_stand_tall(env) == 0.0
+        elif step == 250:
+            assert _squat_cycle_crouch_height(env) == 0.0
+            assert _squat_cycle_stand_tall(env) > 0.0
+            assert _squat_cycle_stand_pose(env) > 0.0
+            assert _squat_cycle_stand_still(env) > 0.0
+        elif step == 350:
+            env.data.qvel[0] = 0.4
+            assert _squat_cycle_keep_pace(env) > 0.0
+            assert _squat_cycle_stand_still(env) == 0.0
+            assert _squat_cycle_static_feet(env) == 0.0
+        elif step == 600:
+            env.data.qvel[0] = 0.0
+            env._get_obs()
+            assert _squat_cycle_stand_still(env) > 0.0
+            assert _squat_cycle_keep_pace(env) == 0.0
+        elif step == 700:
+            np.testing.assert_allclose(obs[59:61], first_obs[59:61], atol=1e-6)
+
+    env.step_count = 75
+    env._get_obs()
+    assert _squat_cycle_caption(env) == "squat cycle: crouch (1.50 s / 14 s)"
+
+
+def test_crouch_stand_cycle_heading_commander(monkeypatch):
+    import microduck_local.behaviors.routines as routines
+
+    env = BehaviorEnv("crouch_stand_cycle", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    env.home_yaw = 0.0
+    monkeypatch.setattr(routines, "_trunk_yaw", lambda _env: 0.2)
+    env.step_count = 350
+    obs = env._get_obs()
+    assert env.twist_cmd[2] == pytest.approx(-0.8)
+    assert obs[50] == pytest.approx(-0.8)
+    env.step_count = 600
+    obs = env._get_obs()
+    assert obs[50] == pytest.approx(0.0)
+
+
+def test_crouch_stand_cycle_crouch_spawn_and_curriculum():
+    from microduck_local.behaviors import _squat_cycle_stage
+
+    behavior = BEHAVIORS["crouch_stand_cycle"]
+    assert len(behavior.curriculum) == 3
+    assert [s.env["MICRODUCK_SPAWN_FAMILY_PROBS"] for s in behavior.curriculum] == [
+        "0.85", "0.50", "0.0",
+    ]
+    assert [s.env["MICRODUCK_ACTUATOR"] for s in behavior.curriculum] == [
+        "xml", "bam", "bam",
+    ]
+    assert sum(s.steps for s in behavior.curriculum) == behavior.default_steps
+
+    env = BehaviorEnv("crouch_stand_cycle", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0,
+                      spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "1.0"})
+    obs, _ = env.reset(seed=0)
+    assert env.last_spawn == "crouch"
+    assert _squat_cycle_stage(env) == "crouch"
+    assert abs(env.data.qpos[env.joint_qpos_adr[3]]) > 1.2
+    assert abs(env.data.qpos[env.joint_qpos_adr[12]]) > 1.2
+    assert env._trunk_xpos[2] < env.stand_z - 0.03
+    np.testing.assert_allclose(env.data.ctrl, env.data.qpos[env.joint_qpos_adr])
+    np.testing.assert_allclose(obs[48:51], np.zeros(3), atol=1e-6)
+
+
+def test_crouch_stand_cycle_head_reward_penalizes_real_head_droop():
+    import mujoco
+
+    from microduck_local.behaviors import _squat_cycle_head_forward, _squat_cycle_head_level
+
+    env = BehaviorEnv("crouch_stand_cycle", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    level = _squat_cycle_head_level(env)
+    forward = _squat_cycle_head_forward(env)
+    original_yaw = float(env.data.qpos[env.joint_qpos_adr[7]])
+    env.data.qpos[env.joint_qpos_adr[7]] += 1.5
+    turned = _squat_cycle_head_forward(env)
+    assert forward > 0.5 and turned < 0.25 * forward
+    env.data.qpos[env.joint_qpos_adr[7]] = original_yaw
+    env.data.qpos[env.joint_qpos_adr[6]] += 0.8
+    mujoco.mj_forward(env.model, env.data)
+    drooped = _squat_cycle_head_level(env)
+    assert level > 0.5
+    assert drooped < 0.75 * level
+    term = next(t for t in BEHAVIORS["crouch_stand_cycle"].terms if t.key == "head_up")
+    assert term.weight == 4.0
+
+
+def test_crouch_walk_cycle_clock_and_command_schedule():
+    from microduck_local.behaviors import (
+        _ROUTINE_PERIOD_STEPS,
+        _routine_caption,
+        _routine_stage,
+    )
+
+    env = BehaviorEnv("crouch_walk_cycle", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    obs, _ = env.reset(seed=0)
+    assert obs.shape == (61,)
+    schedule = (
+        (0, "crouch", 0.0),
+        (249, "crouch", 0.0),
+        (250, "rise", 0.0),
+        (299, "rise", 0.0),
+        (300, "stand", 0.0),
+        (399, "stand", 0.0),
+        (400, "walk", 0.4),
+        (649, "walk", 0.4),
+        (650, "stop", 0.0),
+        (699, "stop", 0.0),
+        (700, "stand", 0.0),
+        (799, "stand", 0.0),
+        (800, "crouch", 0.0),
+    )
+    first_obs = None
+    for step, stage, speed in schedule:
+        env.step_count = step
+        obs = env._get_obs()
+        assert _routine_stage(env) == stage
+        assert obs[48] == pytest.approx(speed)
+        np.testing.assert_allclose(obs[49:51], np.zeros(2), atol=1e-6)
+        if step == 0:
+            first_obs = obs.copy()
+        if step == _ROUTINE_PERIOD_STEPS:
+            np.testing.assert_allclose(obs[59:61], first_obs[59:61], atol=1e-6)
+
+    env.step_count = 75
+    obs = env._get_obs()
+    phase = 2.0 * np.pi * 75.0 / 800.0
+    np.testing.assert_allclose(obs[59:61], [np.sin(phase), np.cos(phase)], atol=1e-6)
+    assert _routine_caption(env) == "routine: crouch (1.50 s / 16 s)"
+
+
+def test_crouch_walk_cycle_rewards_follow_the_clock():
+    from microduck_local.behaviors import (
+        _routine_crouch_height,
+        _routine_keep_pace,
+        _routine_stand_pose,
+        _routine_stand_still,
+        _routine_stand_tall,
+        _routine_static_feet,
+        _squat_z,
+    )
+
+    behavior = BEHAVIORS["crouch_walk_cycle"]
+    assert not behavior.symmetric
+    assert not behavior.height_termination
+    assert behavior.episode_s == 32.0
+    env = BehaviorEnv("crouch_walk_cycle", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    assert not env.height_termination
+
+    env.step_count = 0
+    assert _routine_crouch_height(env) == pytest.approx(_squat_z(env))
+    assert _routine_stand_tall(env) == 0.0
+    assert _routine_stand_still(env) == 0.0
+
+    env.step_count = 250
+    assert _routine_crouch_height(env) == 0.0
+    assert _routine_stand_tall(env) > 0.0
+    assert _routine_stand_pose(env) > 0.0
+    assert _routine_stand_still(env) == 0.0
+
+    env.step_count = 300
+    env._get_obs()
+    assert _routine_stand_still(env) > 0.0
+    assert _routine_keep_pace(env) == 0.0
+
+    env.step_count = 400
+    env._get_obs()
+    env.data.qvel[0] = 0.4
+    assert _routine_stand_tall(env) > 0.0
+    assert _routine_keep_pace(env) > 0.0
+    assert _routine_stand_still(env) == 0.0
+    assert _routine_static_feet(env) == 0.0
+
+    env.step_count = 650
+    assert _routine_stand_pose(env) > 0.0
+    assert _routine_stand_still(env) == 0.0
+
+    env.step_count = 700
+    env._get_obs()
+    assert _routine_stand_still(env) > 0.0
+    assert _routine_keep_pace(env) == 0.0
+
+
+def test_crouch_walk_cycle_heading_commander(monkeypatch):
+    import microduck_local.behaviors.routines as routines
+
+    env = BehaviorEnv("crouch_walk_cycle", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    env.home_yaw = 0.0
+    monkeypatch.setattr(routines, "_trunk_yaw", lambda _env: 0.2)
+    env.step_count = 400
+    obs = env._get_obs()
+    assert env.twist_cmd[2] == pytest.approx(-0.8)
+    assert obs[50] == pytest.approx(-0.8)
+    env.step_count = 700
+    obs = env._get_obs()
+    assert obs[50] == pytest.approx(0.0)
+
+
+def test_crouch_walk_cycle_smoothness_and_training_defaults():
+    from types import SimpleNamespace
+
+    from microduck_local.behaviors import _routine_smooth_pen
+    from microduck_local.train_behavior import _checkpoint_interval, _distill_requested
+
+    behavior = BEHAVIORS["crouch_walk_cycle"]
+    assert behavior.distill_walker
+    assert behavior.checkpoint_every == 150_000
+    args = SimpleNamespace(distill=False, init_from=None, checkpoint_every=0)
+    assert _distill_requested(behavior, args)
+    assert _checkpoint_interval(behavior, args) == 150_000
+    args.checkpoint_every = 100_000
+    assert _checkpoint_interval(behavior, args) == 100_000
+    args.init_from = "runs/existing"
+    assert not _distill_requested(behavior, args)
+
+    env = BehaviorEnv("crouch_walk_cycle", obs_noise=False, domain_rand=False,
+                      action_delay=False, random_yaw=False, seed=0)
+    env.reset(seed=0)
+    env.last_action = np.ones(14)
+    env.prev_action = np.zeros(14)
+    env.step_count = 300
+    standing = _routine_smooth_pen(env)
+    env.step_count = 400
+    walking = _routine_smooth_pen(env)
+    assert standing < 0.0 and walking < 0.0
+    assert walking / standing == pytest.approx(0.75 / 2.5)
 
 
 def test_matcher_takes_a_bare_behavior_id():
@@ -1024,14 +1326,14 @@ def test_run_recipe_matches_gpu_run_not_walk():
 
 def test_only_the_one_sided_recipes_opt_out_of_the_mirror_prior():
     """The audit, as a lock. `Behavior.symmetric` decides whether the trainer
-    adds symmetry.py's mirror loss, so a new recipe that names a side (or
-    imitates a clip) has to be listed here — the default is True and silence
-    would train it under a wrong prior."""
+    adds symmetry.py's mirror loss, so a new recipe that names a side, carries
+    a clock, or imitates a clip has to be listed here — the default is True and
+    silence would train it under a wrong prior."""
     asymmetric = {b.id for b in BEHAVIORS.values() if not b.symmetric}
     # find_ball: from a symmetric start (ball unseen, memory empty) a
     # mirror-consistent policy must output a zero yaw sweep — it cannot pick
     # a side to look first, so the exported mean would sit and stare.
-    assert asymmetric == {"one_leg", "one_leg_hop", "alternate_hop", "bunny_hop", "imitate", "find_ball", "kick_left", "kick_right",
+    assert asymmetric == {"one_leg", "one_leg_hop", "alternate_hop", "bunny_hop", "crouch_walk_cycle", "crouch_stand_cycle", "imitate", "find_ball", "kick_left", "kick_right",
                           "kick_left_wide", "kick_right_wide",     # the box kicks name a foot too (12b)
                           "kick_left_sensed", "kick_right_sensed",   # ...and so do the sensed ones (12h)
                           # ...and the far-range pair, which is the same recipe with a
@@ -2245,3 +2547,40 @@ def test_getup_shepherds_pay_progress_not_state():
     # pays only what the pose actually moved.
     assert sum(sums[k] for k in shepherds) < 8.0
     env.close()
+
+
+def test_every_asimov_getup_behavior_DECLARES_the_handoff():
+    """The get-up is only finished when it hands off and stops moving.
+
+    `handoff_fn` + `handoff_policy` were declared on exactly ONE of the
+    seventeen Asimov get-up behaviors (`asimov_getup_turn`). Every working
+    get-up in this repo trained under `asimov_getup` or
+    `asimov_getup_whole`, which had neither, and `viz_server.handoff_for`
+    returns None unless the behavior declares it — so the lab drove the raw
+    get-up policy forever and Jonathan watched the finished robot SHAKE at a
+    measured 252 deg/s on the hip yaws, while this repo's acceptance scripts
+    reported 2.3 because THEY wired the handoff by hand.
+
+    A deliverable attached per-behavior depends on which of seventeen
+    near-identical entries a run happens to name. This asserts the whole
+    family, so adding an eighteenth cannot quietly omit it.
+    """
+    from microduck_local.behaviors.core import BEHAVIORS
+
+    getups = {
+        bid: b for bid, b in BEHAVIORS.items()
+        if getattr(b, "robot", "") == "asimov1"
+        and str(getattr(b, "task", "")) in ("getup", "getup_ref", "getup_clip")
+    }
+    # A green result must not be able to mean "swept nothing".
+    assert len(getups) >= 15, f"only found {len(getups)} asimov get-ups"
+    missing = sorted(bid for bid, b in getups.items()
+                     if getattr(b, "handoff_fn", None) is None)
+    assert not missing, (
+        f"{len(missing)} asimov get-up behaviors declare no handoff: "
+        f"{missing}. The lab will drive the raw get-up policy forever for "
+        "any run trained under them."
+    )
+    no_policy = sorted(bid for bid, b in getups.items()
+                       if not getattr(b, "handoff_policy", None))
+    assert not no_policy, f"handoff_fn but no handoff_policy: {no_policy}"

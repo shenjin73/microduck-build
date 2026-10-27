@@ -1,0 +1,8 @@
+{
+  "behavior": "crouch_stand_cycle",
+  "title": "Crouch, stand and straight walk composite",
+  "description": "Crouch/stand policy, 2 s alpha_walking transition, then the selected straight_walk checkpoint. Not a PPO-trained single policy.",
+  "group": "composite",
+  "distill": false,
+  "checkpoint_every": 0
+}

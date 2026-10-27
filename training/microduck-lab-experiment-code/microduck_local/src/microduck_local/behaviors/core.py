@@ -152,6 +152,12 @@ class Behavior:
     # its observation and is paid for achieving it, exactly as the shipped
     # walking policy was trained.
     forward_cmd: float = 0.0
+    # Locomotion recipes that need a proven gait can request the cached
+    # alpha_walking distillation instead of discovering one from scratch.
+    distill_walker: bool = False
+    # Independent checkpoints protect a teacher-quality gait from late PPO
+    # regression. Zero keeps the usual live-snapshot-only behavior.
+    checkpoint_every: int = 0
     # DEMO-ONLY assist: fn(env) -> bool, called before each control step when
     # an env is built with spotter=True (showcase previews only — training
     # never sets it, or the policy would learn to lean on a hand that isn't

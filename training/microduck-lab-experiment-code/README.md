@@ -11,13 +11,15 @@
 ## 包含内容
 
 - `behaviors/hop.py`：单腿跳、交替跳、双脚跳实验行为。
-- `behaviors/core.py` / `env.py`：`pre_step_fn` 课程物理钩子。
-- `train_behavior.py`：允许课程阶段覆盖 XML/BAM 执行器。
+- `behaviors/routines.py`：深蹲/站立循环、专用直行及分阶段课程。
+- `behaviors/core.py` / `env.py`：课程钩子、教师蒸馏和 checkpoint 配置。
+- `train_behavior.py`：行为默认蒸馏、checkpoint 和课程执行器覆盖。
+- `compose_policy.py`：按阶段组合蹲站、起步过渡和直行 ONNX。
 - `probe_bunny_jump.py`：跳跃物理可行性扫描。
 - `optimize_bunny_jump.py`：无额外依赖的 CEM 全身轨迹优化器。
-- 行为与 Teach 建议测试。
+- 行为、Teach 建议和组合模型测试。
 
-这些跳跃策略均为研究失败记录，不应直接部署。当前稳定成果是本地训练产物 `runs/fast-run-clone/policy.onnx`，模型文件未包含在本代码包内。
+跳跃策略均为研究失败记录，不应直接部署。最终组合模型单独放在 `training/models/crouch-stand-walk-composite/`；它不是重新 PPO 训练的单一策略。
 
 ## 导入另一台电脑
 
@@ -49,13 +51,14 @@ cd reference/microduck-lab
 cd microduck_local
 uv run --with pytest pytest -q \
   tests/test_behaviors.py \
-  tests/test_teach_robots.py
+  tests/test_teach_robots.py \
+  tests/test_compose_policy.py
 ```
 
-预期专项测试结果：
+当前上游版本的预期专项测试结果：
 
 ```text
-153 passed
+206 passed
 ```
 
 ## 注意

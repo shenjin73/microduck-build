@@ -16,6 +16,7 @@ import importlib as _importlib  # noqa: F401
 
 from ..motion import reload_modules as _reload_modules
 from . import airflip as _airflip
+from . import asimov_tasks as _asimov_tasks
 from . import backflip as _backflip
 from . import ball as _ball
 from . import core as _core
@@ -33,10 +34,12 @@ from . import locomotion as _locomotion
 from . import mars_tasks as _mars_tasks
 from . import moss_tasks as _moss_tasks
 from . import poses as _poses
+from . import routines as _routines
 
 _SUBMODULES = [_core, _poses, _headstand, _backflip, _airflip, _imitate, _kick, _dribble,
                _gazewalk,
-               _getup, _locomotion, _hop, _ball, _lastmetre, _g1_tasks, _mars_tasks,
+               _getup, _locomotion, _routines, _hop, _ball, _lastmetre, _g1_tasks,
+               _asimov_tasks, _mars_tasks,
                _moss_tasks,
                _envm]
 

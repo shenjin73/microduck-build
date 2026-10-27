@@ -3,6 +3,7 @@ import onnx
 import onnxruntime as ort
 from onnx import TensorProto, helper, numpy_helper
 
+from microduck_local.compose_lie_stand import compose_lie_stand
 from microduck_local.compose_policy import compose_policies
 
 
@@ -26,6 +27,59 @@ def _linear_policy(scale: float) -> onnx.ModelProto:
 def _run(model_path, obs):
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
     return session.run(["actions"], {"obs": obs})[0]
+
+
+def _constant_policy(value: float) -> onnx.ModelProto:
+    constant = numpy_helper.from_array(np.full((1, 14), value, np.float32), "constant")
+    node = helper.make_node("Identity", [constant.name], ["actions"])
+    graph = helper.make_graph(
+        [node], "constant_policy",
+        [helper.make_tensor_value_info("obs", TensorProto.FLOAT, [1, 61])],
+        [helper.make_tensor_value_info("actions", TensorProto.FLOAT, [1, 14])],
+        initializer=[constant],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    model.ir_version = 8
+    return model
+
+
+def _selector_sensitive_policy() -> onnx.ModelProto:
+    indices = numpy_helper.from_array(np.full(14, 48, np.int64), "selector_indices")
+    gather = helper.make_node("Gather", ["obs", indices.name], ["actions"], axis=1)
+    graph = helper.make_graph(
+        [gather], "selector_sensitive",
+        [helper.make_tensor_value_info("obs", TensorProto.FLOAT, [1, 61])],
+        [helper.make_tensor_value_info("actions", TensorProto.FLOAT, [1, 14])],
+        initializer=[indices],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    model.ir_version = 8
+    return model
+
+
+def test_lie_stand_composite_selects_children_but_hides_the_selector(tmp_path):
+    lie_path = tmp_path / "lie.onnx"
+    stand_path = tmp_path / "stand.onnx"
+    out_path = tmp_path / "lie-stand.onnx"
+    onnx.save(_constant_policy(1.0), lie_path)
+    onnx.save(_constant_policy(2.0), stand_path)
+    composed = compose_lie_stand(lie_path, stand_path, out_path)
+    onnx.checker.check_model(composed, full_check=True)
+
+    obs = np.zeros((1, 61), np.float32)
+    obs[0, 48] = 1.0
+    np.testing.assert_allclose(_run(out_path, obs), 1.0)
+    obs[0, 48] = 0.0
+    np.testing.assert_allclose(_run(out_path, obs), 2.0)
+    metadata = {entry.key: entry.value for entry in composed.metadata_props}
+    assert metadata["composite.behavior"] == "lie_stand_cycle"
+
+    # The outer flag must not leak into either child policy's normalized input.
+    onnx.save(_selector_sensitive_policy(), lie_path)
+    onnx.save(_selector_sensitive_policy(), stand_path)
+    compose_lie_stand(lie_path, stand_path, out_path)
+    obs[0, 48] = 1.0
+    np.testing.assert_allclose(_run(out_path, obs), 0.0)
 
 
 def test_composed_policy_selects_the_expected_branch(tmp_path):

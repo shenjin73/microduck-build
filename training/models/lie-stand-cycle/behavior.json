@@ -1,0 +1,8 @@
+{
+  "behavior": "lie_stand_cycle",
+  "title": "Lie down, hold, stand, hold — loop",
+  "description": "Composite controller: trained front-down policy for 6 seconds, then Pollen alpha_stand for 6 seconds, repeating. Each half includes roughly one second of transition and five seconds of still hold.",
+  "group": "composite",
+  "distill": false,
+  "checkpoint_every": 0
+}

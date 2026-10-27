@@ -494,14 +494,6 @@ def main() -> None:
     run_name = args.run_name or time.strftime(f"{b.id}-%Y%m%d-%H%M%S")
     out = RUNS_DIR / run_name
     out.mkdir(parents=True, exist_ok=True)
-    # A PREVIOUS run in this directory may have been killed between a
-    # snapshot's temp write and its os.replace. The lab clears those when it
-    # sees the trainer exit, but a CLI run has no lab watching it and a
-    # resumed directory would carry the stale temp forward — so start clean.
-    # (Nothing is writing here yet: this is before the callback exists.)
-    from .run_record import sweep_snapshot_tmps
-    for _stale in sweep_snapshot_tmps(out):
-        print(f"cleared stale {_stale} from a previous interrupted run")
     # Weights go in behavior.json so a restarted/inspected run can't silently
     # train under a different scorecard than the one on record.
     # The clip too: an imitation run is about ONE authored motion, and the

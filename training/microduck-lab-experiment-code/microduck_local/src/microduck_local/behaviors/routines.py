@@ -1,5 +1,6 @@
 import math
 
+from .getup import _getup_hold_raw, _getup_props_down, _getup_spawn_family
 from .locomotion import *  # noqa: F401,F403 — cascades the full upstream namespace,
 
 _ROUTINE_CROUCH_STEPS = round(5.0 / C.CTRL_DT)
@@ -444,6 +445,174 @@ _register(Behavior(
             "No crouch spawns: every cycle starts standing and must include the deep crouch.",
         ),
     ),
+))
+
+# ----------------------------------------------------------- lie down and hold
+
+def _lie_prone(env) -> float:
+    """Dense target for lying on the FRONT: gravity points through body +x."""
+    g = env._projected_gravity()
+    d2 = float((g[0] - 1.0) ** 2 + g[1] ** 2 + g[2] ** 2)
+    return (0.5 * float(np.exp(-d2 / 1.2**2))
+            + 0.5 * float(np.exp(-d2 / 0.35**2)))
+
+
+def _lie_low(env) -> float:
+    """Trunk near its settled prone height, with a wide pull from standing."""
+    d2 = (float(env._trunk_xpos[2]) - 0.045) ** 2
+    return (0.5 * float(np.exp(-d2 / 0.08**2))
+            + 0.5 * float(np.exp(-d2 / 0.025**2)))
+
+
+def _lie_body_down(env) -> float:
+    return min(_getup_props_down(env) / 2.0, 1.0)
+
+
+def _lie_hold(env) -> float:
+    """The actual deliverable: prone, low, resting on the body, and still."""
+    gyro2 = float((env._gyro * env._gyro).sum())
+    calm = float(np.exp(-gyro2 / 0.35**2))
+    return _lie_prone(env) * _lie_low(env) * _lie_body_down(env) * calm
+
+
+def _lie_settle_pen(env) -> float:
+    """Charge motion only after the prone state is reached; transition stays free."""
+    if _lie_prone(env) < 0.65 or _lie_low(env) < 0.55:
+        return 0.0
+    return _still_body_pen(env)
+
+
+_LIE_FRONT_SPAWN = _getup_spawn_family("front")
+
+
+_register(Behavior(
+    id="lie_down",
+    suggest="lie down and hold still",
+    emoji="🛌",
+    title="Lie down and hold",
+    description="Lower from standing onto the front, then remain safely and completely still.",
+    how_it_learns=(
+        "The target is a settled front-down pose: body low, trunk facing the "
+        "floor, non-foot parts genuinely supported, and angular velocity near "
+        "zero. Early practice starts already prone so holding is on-policy; "
+        "later stages remove those starts until it must lower itself from standing."
+    ),
+    keywords=("lie down and hold still", "lie down", "lie prone", "prone",
+              "躺下来", "趴下", "趴卧", "躺下保持"),
+    terms=(
+        RewardTerm("lie_hold", "Big points for a settled, motionless front-down hold",
+                   6.0, _lie_hold),
+        RewardTerm("prone", "Points for rotating the trunk into the front-down pose",
+                   3.0, _lie_prone),
+        RewardTerm("body_low", "Points for lowering the trunk to floor height",
+                   3.0, _lie_low),
+        RewardTerm("body_supported", "Points for resting the body on the floor, not only the feet",
+                   1.5, _lie_body_down),
+        RewardTerm("settle", "Penalty for moving after the prone pose has been reached",
+                   1.0, _lie_settle_pen, is_penalty=True),
+        RewardTerm("soft_landing", "Penalty for slamming the body into the floor",
+                   1.0, _soft_landing_pen, is_penalty=True),
+        RewardTerm("no_limit_parking", "Penalty for grinding joints against their end stops",
+                   1.0, _limit_parking_pen, is_penalty=True),
+    ),
+    default_steps=3_000_000,
+    success_metric="seconds held front-down and still after starting from a stand",
+    episode_s=10.0,
+    scene="all",
+    terminate_on_fall=False,
+    height_termination=False,
+    spawn_families=((0.80, _LIE_FRONT_SPAWN),),
+    curriculum=(
+        CurriculumStage(
+            "learn the quiet prone hold", 750_000,
+            {"MICRODUCK_ACTUATOR": "xml", "MICRODUCK_SPAWN_FAMILY_PROBS": "0.80",
+             "MICRODUCK_GETUP_TILT_LO": "88", "MICRODUCK_GETUP_TILT_HI": "98"},
+            "Most episodes begin settled on the front; learn the five-second hold first.",
+        ),
+        CurriculumStage(
+            "lower into the pose", 1_000_000,
+            {"MICRODUCK_ACTUATOR": "bam", "MICRODUCK_SPAWN_FAMILY_PROBS": "0.35",
+             "MICRODUCK_GETUP_TILT_LO": "88", "MICRODUCK_GETUP_TILT_HI": "98"},
+            "Most starts are standing, with some prone rehearsals retained under BAM servos.",
+        ),
+        CurriculumStage(
+            "lie down from standing", 1_250_000,
+            {"MICRODUCK_ACTUATOR": "bam", "MICRODUCK_SPAWN_FAMILY_PROBS": "0.0"},
+            "Every episode starts standing and must enter and hold the prone pose unaided.",
+        ),
+    ),
+))
+
+# ------------------------------------------------ lie / stand policy schedule
+_LIE_STAND_LIE_STEPS = round(6.0 / C.CTRL_DT)   # ~1 s lower + 5 s hold
+_LIE_STAND_STAND_STEPS = round(6.0 / C.CTRL_DT) # ~1 s get-up + 5 s hold
+_LIE_STAND_PERIOD_STEPS = _LIE_STAND_LIE_STEPS + _LIE_STAND_STAND_STEPS
+
+
+def _lie_stand_step(env) -> int:
+    return int(env.step_count) % _LIE_STAND_PERIOD_STEPS
+
+
+def _lie_stand_stage(env) -> str:
+    return "lie" if _lie_stand_step(env) < _LIE_STAND_LIE_STEPS else "stand"
+
+
+def _lie_stand_obs(env) -> None:
+    step = _lie_stand_step(env)
+    phase = 2.0 * math.pi * step / _LIE_STAND_PERIOD_STEPS
+    # Selector flag for the composite ONNX. The composer strips all command
+    # slots back to zero before either child policy sees the observation.
+    env.twist_cmd[:] = (1.0 if step < _LIE_STAND_LIE_STEPS else 0.0, 0.0, 0.0)
+    env.body_cmd[4], env.body_cmd[5] = math.sin(phase), math.cos(phase)
+
+
+def _lie_stand_caption(env) -> str:
+    return (f"lie/stand: {_lie_stand_stage(env)} "
+            f"({_lie_stand_step(env) * C.CTRL_DT:.2f} s / 12 s)")
+
+
+def _lie_stand_lie_pay(env) -> float:
+    return _lie_hold(env) if _lie_stand_stage(env) == "lie" else 0.0
+
+
+def _lie_stand_stand_pay(env) -> float:
+    return _getup_hold_raw(env) if _lie_stand_stage(env) == "stand" else 0.0
+
+
+_register(Behavior(
+    id="lie_stand_cycle",
+    emoji="🔄",
+    title="Lie down and stand cycle",
+    description=(
+        "Use a composed controller to lie front-down, hold five seconds, get "
+        "up, hold the stand five seconds, and repeat."
+    ),
+    how_it_learns=(
+        "This is a controller schedule, not a new monolithic policy. The first "
+        "half selects the trained lie-down policy; the second selects Pollen's "
+        "alpha_stand get-up policy. Each child receives the zero-command "
+        "observation contract it was trained under."
+    ),
+    keywords=("lie down stand up in a loop", "lie stand cycle", "躺下站立循环"),
+    terms=(
+        RewardTerm("lie_hold", "Points for the quiet prone hold in the lie window",
+                   6.0, _lie_stand_lie_pay),
+        RewardTerm("stand_hold", "Points for an upright two-foot stand in the stand window",
+                   6.0, _lie_stand_stand_pay),
+        RewardTerm("soft_landing", "Penalty for slamming into the floor",
+                   1.0, _soft_landing_pen, is_penalty=True),
+        RewardTerm("no_limit_parking", "Penalty for grinding joints against their end stops",
+                   1.0, _limit_parking_pen, is_penalty=True),
+    ),
+    default_steps=2_000_000,
+    success_metric="two complete 12-second lie/stand cycles without a failed transition",
+    episode_s=24.0,
+    scene="all",
+    terminate_on_fall=False,
+    height_termination=False,
+    symmetric=False,
+    obs_fn=_lie_stand_obs,
+    caption_fn=_lie_stand_caption,
 ))
 
 

@@ -5,7 +5,7 @@
 本机目前没有可加载的 ONNX 模型，因此训练前使用 `--world playroom` 启动 Lab：
 
 ```bash
-cd /Users/jin/Projects/microduck-build/reference/microduck-lab/microduck_local
+cd <workspace>/microduck-build/reference/microduck-lab/microduck_local
 uv run duck-lab --world playroom
 ```
 
@@ -20,7 +20,7 @@ no ducks — pass run dirs or .onnx paths (or --world <scenario>)
 另开一个终端：
 
 ```bash
-cd /Users/jin/Projects/microduck-build/reference/microduck-lab/duck-viewer
+cd <workspace>/microduck-build/reference/microduck-lab/duck-viewer
 npm run dev
 ```
 
@@ -44,6 +44,8 @@ http://localhost:63317/
 | `one_leg_hop` | 单腿向前跳 |
 | `alternate_hop` | 两脚交替跳 |
 | `bunny_hop` | 双脚同时跳 |
+| `lie_down` | 从站立趴卧并保持静止 |
+| `lie_stand_cycle` | 趴卧约 5 秒 → 起立 → 站立约 5 秒，循环执行 |
 | `crouch_walk_cycle` | 下蹲 5 秒 → 站起 1 秒 → 静止 2 秒 → 直行 5 秒 → 停步 1 秒 → 静止 2 秒，循环执行 |
 | `crouch_stand_cycle` | 下蹲 5 秒 → 停站 2 秒 → 直行 5 秒 → 停站 2 秒，循环执行，全程抬头 |
 
@@ -60,7 +62,7 @@ http://localhost:63317/
 不使用网页时，可以直接运行：
 
 ```bash
-cd /Users/jin/Projects/microduck-build/reference/microduck-lab/microduck_local
+cd <workspace>/microduck-build/reference/microduck-lab/microduck_local
 uv run train-behavior bunny_hop
 ```
 
@@ -86,7 +88,7 @@ reference/microduck-lab/microduck_local/runs/
 训练完成后，用生成的模型启动 Lab：
 
 ```bash
-cd /Users/jin/Projects/microduck-build/reference/microduck-lab/microduck_local
+cd <workspace>/microduck-build/reference/microduck-lab/microduck_local
 uv run duck-lab runs/<训练目录名>/policy.onnx
 ```
 
@@ -94,10 +96,17 @@ uv run duck-lab runs/<训练目录名>/policy.onnx
 
 ## 6. 直接观看组合模型
 
-GitHub 已附带最终模型：`training/models/crouch-stand-walk-composite/`。复制到本机运行目录：
+GitHub 已附带组合模型：
+
+```text
+training/models/crouch-stand-walk-composite/
+training/models/lie-stand-cycle/
+```
+
+复制蹲站直行模型到本机运行目录：
 
 ```bash
-cd /Users/jin/Projects/microduck-build
+cd <workspace>/microduck-build
 mkdir -p reference/microduck-lab/microduck_local/runs/crouch-stand-walk-composite
 cp training/models/crouch-stand-walk-composite/* \
   reference/microduck-lab/microduck_local/runs/crouch-stand-walk-composite/
@@ -114,7 +123,7 @@ cp training/models/crouch-stand-walk-composite/* \
 重新生成：
 
 ```bash
-cd /Users/jin/Projects/microduck-build/reference/microduck-lab/microduck_local
+cd <workspace>/microduck-build/reference/microduck-lab/microduck_local
 uv run python -m microduck_local.compose_policy \
   runs/head-forward-eval-v2/001056768.onnx \
   runs/straight-eval/000507904.onnx \
@@ -128,6 +137,20 @@ uv run python -m microduck_local.compose_policy \
 ```bash
 uv run duck-lab runs/crouch-stand-walk-composite/policy.onnx
 ```
+
+复制并观看趴卧/站立循环：
+
+```bash
+cd <workspace>/microduck-build
+mkdir -p reference/microduck-lab/microduck_local/runs/lie-stand-cycle
+cp training/models/lie-stand-cycle/* \
+  reference/microduck-lab/microduck_local/runs/lie-stand-cycle/
+
+cd reference/microduck-lab/microduck_local
+uv run duck-lab runs/lie-stand-cycle/policy.onnx
+```
+
+`policy.onnx` 与 `behavior.json` 必须一起复制；后者负责启用 12 秒时钟、全碰撞场景并关闭普通 walking 的跌倒高度判定。
 
 如果在已有 Lab 上重启，也可以从仓库根目录执行：
 

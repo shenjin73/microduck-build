@@ -15,11 +15,19 @@
 - `behaviors/core.py` / `env.py`：课程钩子、教师蒸馏和 checkpoint 配置。
 - `train_behavior.py`：行为默认蒸馏、checkpoint 和课程执行器覆盖。
 - `compose_policy.py`：按阶段组合蹲站、起步过渡和直行 ONNX。
+- `compose_lie_stand.py`：组合趴卧策略与 `alpha_stand`，形成躺下/站立循环。
 - `probe_bunny_jump.py`：跳跃物理可行性扫描。
 - `optimize_bunny_jump.py`：无额外依赖的 CEM 全身轨迹优化器。
 - 行为、Teach 建议和组合模型测试。
 
-跳跃策略均为研究失败记录，不应直接部署。最终组合模型单独放在 `training/models/crouch-stand-walk-composite/`；它不是重新 PPO 训练的单一策略。
+跳跃策略均为研究失败记录，不应直接部署。可用组合模型位于：
+
+```text
+training/models/crouch-stand-walk-composite/
+training/models/lie-stand-cycle/
+```
+
+每个模型目录中的 `policy.onnx` 和 `behavior.json` 必须一起复制；缺少 sidecar 会导致 Lab 使用错误的环境、时钟和跌倒条件。
 
 ## 导入另一台电脑
 

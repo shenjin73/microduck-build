@@ -30,6 +30,10 @@ def test_behavior_env_steps_clean(behavior_id):
         # vx/vy stay zero like any trick.
         np.testing.assert_allclose(obs[48:50], np.zeros(2, np.float32), atol=1e-6)
         assert abs(float(obs[50])) == pytest.approx(1.0)
+    elif behavior_id == "lie_stand_cycle":
+        # Controller selector, stripped before either child policy sees it.
+        assert float(obs[48]) in (0.0, 1.0)
+        np.testing.assert_allclose(obs[49:51], np.zeros(2, np.float32), atol=1e-6)
     elif cmd:
         # GPU run mix: standing (vx=vy=wz=0), 55% forward (vy=wz=0, vx>=0.3),
         # remainder omni (vy in ±0.3, wz in ±1). Ceiling starts at 0.4.
@@ -104,6 +108,8 @@ def test_matcher():
     assert match_behavior("crouch and stand in a loop").id == "crouch_stand_cycle"
     assert match_behavior("下蹲站立循环").id == "crouch_stand_cycle"
     assert match_behavior("walk straight without turning").id == "straight_walk"
+    assert match_behavior("lie down and hold still").id == "lie_down"
+    assert match_behavior("趴下").id == "lie_down"
     assert match_behavior("wave hello") is None
 
 
@@ -124,6 +130,37 @@ def test_straight_walk_commander_and_training_defaults(monkeypatch):
     assert obs[48] == pytest.approx(0.4)
     assert obs[49] == pytest.approx(0.0)
     assert obs[50] == pytest.approx(-0.8)
+
+
+def test_lie_down_targets_a_settled_front_pose_and_removes_spawn_help():
+    from microduck_local.behaviors import _lie_body_down, _lie_hold, _lie_low, _lie_prone
+
+    b = BEHAVIORS["lie_down"]
+    assert b.scene == "all"
+    assert not b.terminate_on_fall and not b.height_termination
+    assert len(b.curriculum) == 3
+    assert [s.env["MICRODUCK_SPAWN_FAMILY_PROBS"] for s in b.curriculum] == [
+        "0.80", "0.35", "0.0",
+    ]
+    assert sum(s.steps for s in b.curriculum) == b.default_steps
+
+    standing = BehaviorEnv("lie_down", obs_noise=False, domain_rand=False,
+                           action_delay=False, random_yaw=False, seed=0,
+                           spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "0.0"})
+    standing.reset(seed=0)
+    stand_score = _lie_hold(standing)
+
+    prone = BehaviorEnv("lie_down", obs_noise=False, domain_rand=False,
+                        action_delay=False, random_yaw=False, seed=0,
+                        spawn_overrides={"MICRODUCK_SPAWN_FAMILY_PROBS": "1.0",
+                                         "MICRODUCK_GETUP_TILT_LO": "92",
+                                         "MICRODUCK_GETUP_TILT_HI": "92"})
+    prone.reset(seed=0)
+    assert prone.last_spawn == "front"
+    assert _lie_prone(prone) > _lie_prone(standing)
+    assert _lie_low(prone) > _lie_low(standing)
+    assert _lie_body_down(prone) > 0.0
+    assert _lie_hold(prone) > stand_score
 
 
 def test_crouch_stand_cycle_walks_only_between_standing_pauses():
@@ -1333,7 +1370,7 @@ def test_only_the_one_sided_recipes_opt_out_of_the_mirror_prior():
     # find_ball: from a symmetric start (ball unseen, memory empty) a
     # mirror-consistent policy must output a zero yaw sweep — it cannot pick
     # a side to look first, so the exported mean would sit and stare.
-    assert asymmetric == {"one_leg", "one_leg_hop", "alternate_hop", "bunny_hop", "crouch_walk_cycle", "crouch_stand_cycle", "imitate", "find_ball", "kick_left", "kick_right",
+    assert asymmetric == {"one_leg", "one_leg_hop", "alternate_hop", "bunny_hop", "crouch_walk_cycle", "crouch_stand_cycle", "lie_stand_cycle", "imitate", "find_ball", "kick_left", "kick_right",
                           "kick_left_wide", "kick_right_wide",     # the box kicks name a foot too (12b)
                           "kick_left_sensed", "kick_right_sensed",   # ...and so do the sensed ones (12h)
                           # ...and the far-range pair, which is the same recipe with a

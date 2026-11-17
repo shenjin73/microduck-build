@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1440" viewBox="0 0 1440 1440" role="img" aria-labelledby="title desc">
+  <title id="title">Microduck 电源连接逻辑图</title>
+  <desc id="desc">NP-F550 经取电板和无源 HUB 分配电池原电压至飞特舵机、community-kit IMU 和官方 HAT。IMU 自行降压，HAT 将电池电压降为 5V 供应 ZERO 3W，ZERO 再提供 3.3V 给 HAT。所有设备共地，USB-C 与电池回供不并接。</desc>
+  <defs>
+    <marker id="red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#c4413b"/></marker>
+    <marker id="amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#b57808"/></marker>
+    <marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#25816a"/></marker>
+    <style>
+      text{font-family:"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#243448;font-size:19px}
+      .title{font-size:34px;font-weight:700}.sub{font-size:18px;fill:#64748b}
+      .head{font-size:23px;font-weight:650}.small{font-size:17px}.tiny{font-size:16px}
+      .r{fill:#c4413b}.a{fill:#986400}.g{fill:#25816a}.muted{fill:#64748b}
+      .raw{fill:#fff5f3;stroke:#c4413b;stroke-width:2}.five{fill:#fffaf0;stroke:#b57808;stroke-width:2}
+      .logic{fill:#f0faf6;stroke:#25816a;stroke-width:2}.note{fill:#f3f6fa;stroke:#cbd5e1;stroke-width:1.5}
+      .rp{fill:none;stroke:#c4413b;stroke-width:3;marker-end:url(#red)}
+      .ap{fill:none;stroke:#b57808;stroke-width:3;marker-end:url(#amber)}
+      .gp{fill:none;stroke:#25816a;stroke-width:3;marker-end:url(#green)}
+    </style>
+  </defs>
+  <rect width="1440" height="1440" fill="#fff"/>
+  <text x="45" y="57" class="title">Microduck · 电源连接逻辑图</text>
+  <text x="45" y="91" class="sub">主方案：NP-F550 + 飞特 HD-1910 + 官方 RPI Robot HAT + ZERO 3W + community-kit GD32 IMU</text>
+  <text x="45" y="121" class="tiny muted">供电关系图，非插头朝向图；电源并联，DATA 通信线省略。针脚与版本证据见同名 Markdown 文档。</text>
+
+  <rect x="45" y="155" width="280" height="110" rx="12" class="raw"/>
+  <text x="185" y="190" text-anchor="middle" class="head">NP-F550 电池</text>
+  <text x="185" y="222" text-anchor="middle">2S · 标称 7.4V</text>
+  <text x="185" y="250" text-anchor="middle" class="small r">满电约 8.4V，不是 8.2V</text>
+  <path d="M325 210H390" class="rp"/>
+  <rect x="395" y="155" width="250" height="110" rx="12" class="raw"/>
+  <text x="520" y="192" text-anchor="middle" class="head">电池取电板</text>
+  <text x="520" y="224" text-anchor="middle">banana_pcb / 触点</text>
+  <text x="520" y="251" text-anchor="middle" class="small">仅引出正负极</text>
+  <path d="M645 210H730" class="rp"/>
+  <rect x="735" y="155" width="310" height="110" rx="12" class="raw"/>
+  <text x="890" y="192" text-anchor="middle" class="head">HUB 无源分线板</text>
+  <text x="890" y="224" text-anchor="middle">+BATT / GND / DATA</text>
+  <text x="890" y="251" text-anchor="middle" class="small r">不降压 · 不充电</text>
+  <path d="M1045 195H1095V184H1130M1045 230H1095V240H1130" fill="none" stroke="#94a3b8" stroke-width="2"/>
+  <rect x="1130" y="155" width="265" height="110" rx="12" class="note"/>
+  <text x="1262" y="191" text-anchor="middle" class="head">缓冲电容</text>
+  <text x="1262" y="222" text-anchor="middle" class="small">跨接 +BATT 与 GND</text>
+  <text x="1262" y="249" text-anchor="middle" class="small">容量 / 耐压按板版核对</text>
+
+  <path d="M890 265V320H245V365" class="rp"/>
+  <path d="M890 320H695V365" class="rp"/>
+  <path d="M890 320H1170V365" class="rp"/>
+  <circle cx="890" cy="320" r="5" fill="#c4413b"/>
+  <text x="45" y="310" class="small r">电池原电压母线：各支路电源并联</text>
+
+  <rect x="45" y="370" width="400" height="130" rx="12" class="raw"/>
+  <text x="245" y="408" text-anchor="middle" class="head">15 × 飞特 HD-1910</text>
+  <text x="245" y="441" text-anchor="middle">左腿 + 右腿 + 头 / 颈部</text>
+  <text x="245" y="476" text-anchor="middle" class="r">直接使用 +BATT，不经过 HAT 5V</text>
+  <rect x="45" y="545" width="400" height="161" rx="12" class="note"/>
+  <text x="65" y="578" class="head">物理四路 HUB 的接法</text>
+  <text x="65" y="611">左腿 / 右腿 / IMU / 头颈线束</text>
+  <text x="65" y="643">HAT 从头颈线束接入同一母线。</text>
+  <text x="65" y="676" class="small muted">图中逻辑分支不代表额外增加接口。</text>
+
+  <rect x="515" y="370" width="360" height="130" rx="12" class="raw"/>
+  <text x="695" y="408" text-anchor="middle" class="head">独立躯干 IMU · GD32</text>
+  <text x="695" y="441" text-anchor="middle">community-kit CN2</text>
+  <text x="695" y="476" text-anchor="middle" class="small">1 DATA / 2 +BATT / 3 GND</text>
+  <path d="M695 500V540" class="rp"/>
+  <rect x="515" y="545" width="360" height="95" rx="12" class="logic"/>
+  <text x="695" y="581" text-anchor="middle" class="head">U1 ETA2845 + L1</text>
+  <text x="695" y="616" text-anchor="middle" class="g">+BATT → IMU 本地 3.3V</text>
+  <path d="M695 640V665" class="gp"/>
+  <rect x="515" y="670" width="360" height="65" rx="10" class="logic"/>
+  <text x="695" y="697" text-anchor="middle" class="small">MCU / IMU / 收发逻辑</text>
+  <text x="695" y="720" text-anchor="middle" class="tiny">板内另有 1.8V；不向 HAT 送 3.3V</text>
+
+  <rect x="945" y="370" width="450" height="95" rx="12" class="raw"/>
+  <text x="1170" y="407" text-anchor="middle" class="head">官方 HAT · J13 或 J14</text>
+  <text x="1170" y="442" text-anchor="middle">1 GND / 2 +BATT / 3 DATA</text>
+  <path d="M1170 465V500" class="rp"/>
+  <rect x="945" y="505" width="450" height="170" rx="12" class="five"/>
+  <text x="1170" y="542" text-anchor="middle" class="head">U9 AP63205 + L4</text>
+  <text x="1170" y="574" text-anchor="middle" class="a">+BATT → 5V（芯片 2A 级）</text>
+  <path d="M1170 588V609" class="ap"/>
+  <text x="1170" y="637" text-anchor="middle" class="head">Q2 + U10 LM5050-1</text>
+  <text x="1170" y="662" text-anchor="middle" class="small">5V 理想二极管路径</text>
+  <path d="M1170 675V760" class="ap"/>
+  <circle cx="1170" cy="720" r="5" fill="#b57808"/>
+  <text x="1190" y="716" class="a">HAT +5V</text>
+  <path d="M1170 720H920V810H880" class="ap"/>
+  <rect x="515" y="765" width="360" height="100" rx="12" class="five"/>
+  <text x="695" y="802" text-anchor="middle" class="head">HAT PAM8406 功放</text>
+  <text x="695" y="836" text-anchor="middle" class="small">喇叭接功放输出，不接电源轨</text>
+  <rect x="945" y="765" width="450" height="110" rx="12" class="five"/>
+  <text x="1170" y="804" text-anchor="middle" class="head">Radxa ZERO 3W</text>
+  <text x="1170" y="839" text-anchor="middle">40针物理 Pin 2 / 4：5V 输入</text>
+  <text x="1170" y="863" text-anchor="middle" class="tiny muted">与功放等共享 HAT 的 5V 电源预算</text>
+
+  <text x="65" y="773" class="head">电源颜色</text>
+  <text x="65" y="806" class="r">红：电池母线 +BATT</text>
+  <text x="65" y="837" class="a">黄：HAT 的 5V 支路</text>
+  <text x="65" y="868" class="g">绿：各板的低压逻辑电源</text>
+
+  <path d="M1170 875V977H880" class="gp"/>
+  <text x="975" y="916" class="g">ZERO → HAT：3.3V</text>
+  <text x="975" y="946" class="small g">40针物理 Pin 1 / 17</text>
+  <rect x="515" y="920" width="360" height="115" rx="12" class="logic"/>
+  <text x="695" y="957" text-anchor="middle" class="head">HAT +3V3</text>
+  <text x="695" y="989" text-anchor="middle" class="small">总线逻辑 / 板载传感器</text>
+  <text x="695" y="1016" text-anchor="middle" class="small">音频部分 / Qwiic 等负载</text>
+  <path d="M515 977H450" class="gp"/>
+  <rect x="45" y="920" width="400" height="115" rx="12" class="logic"/>
+  <text x="245" y="957" text-anchor="middle" class="head">HAT U3 XC6206</text>
+  <text x="245" y="989" text-anchor="middle" class="g">3.3V → 1.8V</text>
+  <text x="245" y="1016" text-anchor="middle" class="small">音频数字电源；不是从 5V 直接降压</text>
+
+  <rect x="45" y="1070" width="1350" height="55" rx="10" fill="#eaf0f7"/>
+  <text x="720" y="1105" text-anchor="middle">共地：电池负极 = HUB GND = 舵机 GND = IMU GND = HAT GND = ZERO GND（返回线省略）</text>
+  <rect x="45" y="1148" width="1350" height="112" rx="10" fill="#fff5e8" stroke="#e8b76a"/>
+  <text x="65" y="1180" font-weight="650">上电边界</text>
+  <text x="65" y="1210" class="small">① USB-C 与电池回供不并接；NP-F550 使用匹配的外部充电器，HAT 不负责充电。</text>
+  <text x="65" y="1240" class="small">② TH1 在 DATA 线上，不是舵机电源保险丝。③ XL330 不可套用 2S 直供。④ 实物针序、极性及保护必须另行确认。</text>
+  <text x="45" y="1294" class="tiny muted">依据：官方 HAT 原理图/PCB、community-kit HUB/IMU PCB 与生产网表；详见 power-connection-logic.md。</text>
+  <text x="1395" y="1294" text-anchor="end" class="tiny muted">资料核对，非实机验收</text>
+</svg>

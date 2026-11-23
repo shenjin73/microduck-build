@@ -1,0 +1,56 @@
+{
+  "version": "v6 / obsolete eye slots filled",
+  "filled_slots": 3,
+  "slot_bounds_XZ": [
+    [
+      [
+        -1.7075576782226562,
+        28.31279754638672
+      ],
+      [
+        1.7075576782226562,
+        29.54383087158203
+      ]
+    ],
+    [
+      [
+        -8.991042137145996,
+        13.823159217834473
+      ],
+      [
+        -6.440823078155518,
+        17.156963348388672
+      ]
+    ],
+    [
+      [
+        6.440823078155518,
+        13.823159217834473
+      ],
+      [
+        8.991042137145996,
+        17.156963348388672
+      ]
+    ]
+  ],
+  "added_volume_mm3": 13.327383098811424,
+  "removed_volume_mm3": 0.0,
+  "protected_camera_holes_and_mounts_added_volume_mm3": 1.3020871280294751e-08,
+  "face_watertight": true,
+  "face_winding_consistent": true,
+  "complete_STL_parts": {
+    "face": "鸭脸_瑞莎IMX219_旧槽填实_v6.stl",
+    "eye": "眼睛_10p5mm防护螺丝固定_v6.stl",
+    "bottom": "头部集成板_M2防脱_v6.stl",
+    "cover": "头盖_原样.stl"
+  },
+  "unchanged_parts": [
+    "eye",
+    "bottom",
+    "cover"
+  ],
+  "camera_pillar_mm": 6,
+  "zero_pillar_mm": 13,
+  "eye_height_mm": 10.5,
+  "inherited_limitations": "v5 physical-fit,full camera/ZERO/HAT components,and impact testing remain unverified"
+}

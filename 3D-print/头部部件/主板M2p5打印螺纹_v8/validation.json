@@ -1,0 +1,46 @@
+{
+  "version": "v8 printed thread prototype/no inserts",
+  "screw": "M2.5x0.45 standard right-hand machine screw,user photo6mm under-head length",
+  "pitch_mm": 0.45,
+  "FDM_minor_diameter_mm": 2.18,
+  "FDM_major_diameter_mm": 2.66,
+  "bore_depth_mm": 6.4,
+  "original_entrance_diameter_mm": 2.7,
+  "recommended_layer_height_mm": 0.12,
+  "post_centres_XZ": [
+    [
+      -28.92,
+      8.565
+    ],
+    [
+      -28.92,
+      31.435
+    ],
+    [
+      28.92,
+      8.565
+    ],
+    [
+      28.92,
+      31.435
+    ]
+  ],
+  "post_height_mm": 13,
+  "removed_volume_mm3": 27.81967904551139,
+  "added_volume_mm3": 0.0,
+  "changes_outside_four_bore_regions_mm3": 0.0,
+  "watertight": true,
+  "winding_consistent": true,
+  "thread_handedness": "RH:clockwise rotation viewed into mouth increases depth",
+  "coupon": "M2p5螺纹试样_先打印.stl",
+  "unchanged_parts": [
+    "eye",
+    "bottom",
+    "cover"
+  ],
+  "limitations": [
+    "FDM small threads not physically test-fit;coupon must pass before printing wholeface",
+    "Clearance is a prototype allowance,not a machined ISO tolerance class",
+    "Inherited v7 ToF fastener overlap and0.4mm PCB/ear margin remain unverified"
+  ]
+}

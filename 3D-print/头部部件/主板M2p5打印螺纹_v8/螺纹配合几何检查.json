@@ -1,0 +1,9 @@
+{
+  "nominal_screw_major_diameter_mm": 2.5,
+  "pitch_mm": 0.45,
+  "installed_depth_mm": 4.4,
+  "collision_aligned_mm3": 0.0,
+  "collision_rotated90_without_advance_mm3": 0.5864121722468338,
+  "collision_rotated90_advanced0p1125_mm3": 0.0,
+  "physical_fit_tested": false
+}
